@@ -11,7 +11,8 @@ import {
   History,
   FileText,
   Building,
-  UserCheck
+  UserCheck,
+  Trash2
 } from 'lucide-react';
 import { Ticket, TicketStatus, AuditLog } from '../types';
 
@@ -20,6 +21,7 @@ interface TicketDetailModalProps {
   onClose: () => void;
   onUpdateStatus: (ticketId: number, status: TicketStatus) => void;
   onAddNote: (ticketId: number, note: string, author: string) => Promise<void>;
+  onDelete?: (ticketId: number) => void;
   fullTranscript?: string;
 }
 
@@ -28,6 +30,7 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
   onClose,
   onUpdateStatus,
   onAddNote,
+  onDelete,
   fullTranscript
 }) => {
   const [newNote, setNewNote] = useState<string>('');
@@ -283,7 +286,24 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
         </div>
 
         {/* Modal Footer */}
-        <div className="px-6 py-3 border-t border-slate-800 bg-slate-950 flex justify-end">
+        <div className="px-6 py-3 border-t border-slate-800 bg-slate-950 flex items-center justify-between">
+          <div>
+            {ticket.status === 'RESOLVED' && onDelete && (
+              <button
+                onClick={() => {
+                  if (window.confirm(`Are you sure you want to permanently delete resolved ticket #${ticket.id} (${ticket.title})?\n\nThis will remove it from the system.`)) {
+                    onDelete(ticket.id);
+                    onClose();
+                  }
+                }}
+                id="modal-delete-resolved-ticket-btn"
+                className="px-3.5 py-1.5 rounded-xl bg-red-950/60 hover:bg-red-900/80 border border-red-500/50 text-red-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                <span>Delete Resolved Ticket</span>
+              </button>
+            )}
+          </div>
           <button
             onClick={onClose}
             className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold"

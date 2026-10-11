@@ -11,7 +11,8 @@ import {
   ArrowRight,
   ShieldAlert,
   MessageSquare,
-  Languages
+  Languages,
+  Trash2
 } from 'lucide-react';
 import { Ticket, TicketStatus, UrgencyTier } from '../types';
 
@@ -19,12 +20,14 @@ interface TicketCardProps {
   ticket: Ticket;
   onSelect: (ticket: Ticket) => void;
   onUpdateStatus: (ticketId: number, nextStatus: TicketStatus) => void;
+  onDelete?: (ticketId: number) => void;
 }
 
 export const TicketCard: React.FC<TicketCardProps> = ({
   ticket,
   onSelect,
-  onUpdateStatus
+  onUpdateStatus,
+  onDelete
 }) => {
   // Department Icon and Accent color
   const getDeptConfig = (dept: string) => {
@@ -216,6 +219,22 @@ export const TicketCard: React.FC<TicketCardProps> = ({
             >
               <span>{nextStatus.replace(/_/g, ' ')}</span>
               <ArrowRight className="w-3 h-3" />
+            </button>
+          )}
+
+          {ticket.status === 'RESOLVED' && onDelete && (
+            <button
+              onClick={() => {
+                if (window.confirm(`Delete resolved ticket #${ticket.id} (${ticket.title})?\n\nThis will remove the ticket from the system.`)) {
+                  onDelete(ticket.id);
+                }
+              }}
+              id={`delete-ticket-${ticket.id}-btn`}
+              className="py-1.5 px-2.5 rounded-lg bg-red-950/40 hover:bg-red-900/60 border border-red-500/40 text-red-300 hover:text-white text-xs font-semibold flex items-center justify-center gap-1 transition-colors"
+              title="Delete resolved ticket"
+            >
+              <Trash2 className="w-3 h-3 text-red-400" />
+              <span>Delete</span>
             </button>
           )}
         </div>

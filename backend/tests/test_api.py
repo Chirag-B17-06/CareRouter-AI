@@ -306,3 +306,66 @@ def test_delete_call_and_tickets():
     # Verify call and tickets are gone
     assert len(client.get("/api/calls").json()) == 0
     assert len(client.get("/api/tickets").json()) == 0
+
+def test_delete_resolved_ticket_success():
+    """Deleting a ticket with status RESOLVED must succeed without deleting parent call or sibling tickets."""
+    payload = {
+        "raw_transcript": "Patient in Room 303 needs pillow and also needs water pitcher."
+    }
+    res = client.post("/api/calls/process-transcript", json=payload)
+    assert res.status_code == 200
+    tickets = res.json()["extracted_tickets"]
+    assert len(tickets) >= 2
+    t1_id = tickets[0]["id"]
+    t2_id = tickets[1]["id"]
+    call_id = res.json()["call"]["id"]
+
+    # Mark ticket 1 as RESOLVED
+    patch_res = client.patch(f"/api/tickets/{t1_id}", json={"status": "RESOLVED"})
+    assert patch_res.status_code == 200
+    assert patch_res.json()["status"] == "RESOLVED"
+
+    # Delete resolved ticket 1
+    del_res = client.delete(f"/api/tickets/{t1_id}")
+    assert del_res.status_code == 200
+    assert "deleted successfully" in del_res.json()["message"].lower()
+
+    # Verify ticket 1 is gone
+    get_res = client.get(f"/api/tickets/{t1_id}")
+    assert get_res.status_code == 404
+
+    # Verify ticket 2 and Call STILL EXIST (no accidental cascading deletion)
+    get_t2 = client.get(f"/api/tickets/{t2_id}")
+    assert get_t2.status_code == 200
+
+    get_call = client.get(f"/api/calls/{call_id}")
+    assert get_call.status_code == 200
+
+def test_delete_unresolved_ticket_rejected():
+    """Attempting to delete a ticket that is PENDING or IN_PROGRESS must be rejected with 400."""
+    payload = {
+        "raw_transcript": "Patient has acute chest pain and shortness of breath in Room 101."
+    }
+    res = client.post("/api/calls/process-transcript", json=payload)
+    assert res.status_code == 200
+    ticket_id = res.json()["extracted_tickets"][0]["id"]
+
+    # Attempt to delete PENDING ticket -> Must fail
+    del_res = client.delete(f"/api/tickets/{ticket_id}")
+    assert del_res.status_code == 400
+    assert "only tickets with status 'resolved' can be deleted" in del_res.json()["detail"].lower()
+
+    # Advance to IN_PROGRESS and attempt to delete -> Must fail
+    client.patch(f"/api/tickets/{ticket_id}", json={"status": "IN_PROGRESS"})
+    del_res2 = client.delete(f"/api/tickets/{ticket_id}")
+    assert del_res2.status_code == 400
+    assert "only tickets with status 'resolved' can be deleted" in del_res2.json()["detail"].lower()
+
+def test_empty_transcript_submission_rejected():
+    """Submitting empty or whitespace-only transcript must be rejected with 400."""
+    res1 = client.post("/api/calls/process-transcript", json={"raw_transcript": ""})
+    assert res1.status_code in (400, 422)
+
+    res2 = client.post("/api/calls/process-transcript", json={"raw_transcript": "    "})
+    assert res2.status_code == 400
+    assert "empty or blank transcript" in res2.json()["detail"].lower()

@@ -149,6 +149,7 @@ CLINICAL_ACTION_KEYWORDS = [
     "food", "lunch", "dinner", "meal", "tray", "diet", "sugar",
     "clean", "spill", "water", "glass", "wheelchair", "trash",
     "discharge", "paper", "doctor", "dr.", "bill", "insurance",
+    "blanket", "pillow", "towel", "linen", "sheets", "assist", "nurse", "help",
     # Hindi
     "दर्द", "सांस", "आईवी", "सूजन", "खून", "गिर", "बेहोश", "दवा", "एलर्जी", "गोली",
     "खाना", "भोजन", "सफाई", "कांच", "डिस्चार्ज", "कागजात", "डॉक्टर", "बिल", "बीमा", "फर्श",

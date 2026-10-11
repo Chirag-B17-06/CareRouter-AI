@@ -230,11 +230,12 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
         throw new Error("Your browser does not support microphone recording (MediaRecorder API).");
       }
 
-      // Constraints: allow device selection and clean audio
+      // Constraints: crisp clean audio capture with noise suppression & echo cancellation
       const audioConstraints: MediaTrackConstraints = {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: true
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1
       };
 
       if (selectedDeviceId) {
@@ -400,25 +401,30 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     setUploadedFile(file);
   };
 
-  // Submit Audio to faster-whisper Speech-to-Text
-  const handleTranscribeAudio = async () => {
+  // Submit Audio to faster-whisper Speech-to-Text with optional language override
+  const handleTranscribeAudio = async (overrideLanguage?: string) => {
     const audioInput = activeTab === 'record' ? recordedAudioBlob : uploadedFile;
     if (!audioInput) {
       alert("Please record or select an audio file first.");
       return;
     }
 
+    const langToUse = overrideLanguage || selectedLanguage;
+    if (overrideLanguage) {
+      setSelectedLanguage(overrideLanguage);
+    }
+
     setIsTranscribing(true);
     setTranscribeNotice(null);
     try {
       const filename = activeTab === 'record' ? 'mic_recording.webm' : (uploadedFile?.name || 'uploaded_call.webm');
-      const result = await uploadAndTranscribeAudio(audioInput, selectedLanguage, filename);
+      const result = await uploadAndTranscribeAudio(audioInput, langToUse, filename);
       setTranscribeResult(result);
       setEditableTranscript(result.transcript);
 
       if (!result.transcript || result.transcript.trim() === '') {
         setTranscribeNotice(
-          "No spoken words were recognized in this audio. The recording may be silent, quiet, or your microphone input may be muted. You can replay the audio above, re-record with a different microphone, or type your conversation manually in the text box below."
+          "No spoken words were recognized in this audio. The recording may be silent, quiet, or your microphone input may be muted. You can replay the audio above, re-record with a different microphone, type your conversation manually below, or flag for urgent human review."
         );
       } else {
         soundManager.playSuccessChime();
@@ -803,7 +809,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                       <Trash2 className="w-4 h-4" />
                     </button>
                     <button
-                      onClick={handleTranscribeAudio}
+                      onClick={() => handleTranscribeAudio()}
                       disabled={isTranscribing}
                       id="transcribe-recording-btn"
                       className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs shadow-md shadow-sky-600/30 flex items-center gap-1.5 disabled:opacity-50"
@@ -871,7 +877,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                 </div>
 
                 <button
-                  onClick={handleTranscribeAudio}
+                  onClick={() => handleTranscribeAudio()}
                   disabled={isTranscribing}
                   id="transcribe-uploaded-file-btn"
                   className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs shadow-md shadow-sky-600/30 flex items-center gap-1.5 disabled:opacity-50"
@@ -899,16 +905,62 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
               {/* Language & Confidence Badge */}
               <div className="flex items-center gap-2">
-                <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-sky-500/20 text-sky-300 border border-sky-500/30">
-                  {transcribeResult.language_name}
-                </span>
+                {transcribeResult.language_uncertain ? (
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40 flex items-center gap-1">
+                    <AlertTriangle className="w-3 h-3" />
+                    Language Uncertain
+                  </span>
+                ) : (
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-sky-500/20 text-sky-300 border border-sky-500/30 flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3 text-sky-400" />
+                    {transcribeResult.language_name}
+                  </span>
+                )}
                 <span className="text-[11px] text-slate-400">
-                  Confidence: {Math.round(transcribeResult.transcription_confidence * 100)}%
+                  Confidence: {Math.round((transcribeResult.transcription_confidence || transcribeResult.language_confidence) * 100)}%
                 </span>
               </div>
             </div>
 
-            {/* Empty Transcription Warning / Recovery */}
+            {/* Language Uncertain Banner with Quick Language Overrides */}
+            {transcribeResult.language_uncertain && (
+              <div className="p-3.5 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 text-xs space-y-2">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-1.5 font-bold text-amber-300">
+                    <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                    <span>Language Detection Uncertain</span>
+                  </div>
+                  <span className="text-[11px] text-slate-300">
+                    Select language hint below to re-transcribe with dedicated script model:
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 flex-wrap pt-1">
+                  <button
+                    onClick={() => handleTranscribeAudio('kn')}
+                    disabled={isTranscribing}
+                    className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-purple-900/60 border border-purple-500/40 text-purple-300 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                  >
+                    <span>ಕನ್ನಡ (Kannada)</span>
+                  </button>
+                  <button
+                    onClick={() => handleTranscribeAudio('hi')}
+                    disabled={isTranscribing}
+                    className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-orange-900/60 border border-orange-500/40 text-orange-300 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                  >
+                    <span>हिन्दी (Hindi)</span>
+                  </button>
+                  <button
+                    onClick={() => handleTranscribeAudio('en')}
+                    disabled={isTranscribing}
+                    className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-sky-900/60 border border-sky-500/40 text-sky-300 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                  >
+                    <span>English</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Empty Transcription Warning / Recovery / Human Review */}
             {transcribeNotice && (
               <div className="p-3.5 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 text-xs space-y-2">
                 <div className="flex items-center gap-2 font-bold text-amber-300">
@@ -918,13 +970,25 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                 <p className="text-[11px] leading-relaxed text-amber-200/90">
                   {transcribeNotice}
                 </p>
-                <div className="flex items-center gap-2 pt-1">
+                <div className="flex items-center gap-2 flex-wrap pt-1">
                   <button
                     onClick={startRecording}
                     className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs flex items-center gap-1"
                   >
                     <RotateCcw className="w-3 h-3" />
                     <span>Try Recording Again</span>
+                  </button>
+                  <button
+                    onClick={() => {
+                      setEditableTranscript(
+                        "[AUDIO FLAGGED FOR HUMAN CLINICAL REVIEW]: Unintelligible voice audio or inaudible patient speech captured. Immediate in-person nurse check requested."
+                      );
+                      setTranscribeNotice(null);
+                    }}
+                    className="px-3 py-1.5 rounded-lg bg-red-600/80 hover:bg-red-600 text-white font-semibold text-xs flex items-center gap-1 border border-red-500/50"
+                  >
+                    <ShieldAlert className="w-3 h-3" />
+                    <span>Flag for Urgent Human Review</span>
                   </button>
                   <span className="text-[11px] text-slate-400">or type the patient's conversation directly below:</span>
                 </div>

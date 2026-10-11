@@ -3,7 +3,8 @@ import {
   fetchTickets,
   fetchAnalytics,
   updateTicket,
-  addTicketNote
+  addTicketNote,
+  deleteTicket
 } from './services/api';
 import { Ticket, AnalyticsData, ProcessCallResult, TicketStatus } from './types';
 import { Navbar } from './components/Navbar';
@@ -98,6 +99,22 @@ export const App: React.FC = () => {
     setSelectedTicket(updated);
     showToast("Clinical triage note logged successfully");
     soundManager.playSuccessChime();
+  };
+
+  // Delete resolved ticket from backend and update dashboard state immediately
+  const handleDeleteTicket = async (ticketId: number) => {
+    try {
+      await deleteTicket(ticketId);
+      setTickets((prev) => prev.filter((t) => t.id !== ticketId));
+      if (selectedTicket && selectedTicket.id === ticketId) {
+        setSelectedTicket(null);
+      }
+      showToast(`Resolved ticket #${ticketId} deleted successfully.`);
+      soundManager.playSuccessChime();
+      fetchAnalytics().then(setAnalytics).catch(() => {});
+    } catch (err) {
+      alert("Failed to delete ticket: " + (err as Error).message);
+    }
   };
 
   // Callback when audio is successfully transcribed & processed
@@ -274,6 +291,7 @@ export const App: React.FC = () => {
               tickets={tickets}
               onSelectTicket={(ticket) => setSelectedTicket(ticket)}
               onUpdateStatus={handleUpdateStatus}
+              onDeleteTicket={handleDeleteTicket}
               onNavigateToRecord={() => setActiveTab('record')}
             />
 
@@ -305,6 +323,7 @@ export const App: React.FC = () => {
         onClose={() => setSelectedTicket(null)}
         onUpdateStatus={handleUpdateStatus}
         onAddNote={handleAddNote}
+        onDelete={handleDeleteTicket}
       />
 
       {/* Analytics Modal */}

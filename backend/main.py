@@ -149,6 +149,13 @@ def process_transcript_endpoint(payload: CallCreate, db: Session = Depends(get_d
     Process an actual reviewed transcript: decompose into separate department tickets,
     detect emergencies with negation, and store in SQLite.
     """
+    # Prevent processing empty transcripts
+    if not payload.raw_transcript or not payload.raw_transcript.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot process an empty or blank transcript. Please verify or input the conversation text."
+        )
+
     # Prevent duplicate submissions if the exact same call was submitted within the last 15 seconds
     existing = db.query(Call).filter(
         Call.raw_transcript == payload.raw_transcript,
@@ -354,9 +361,17 @@ def delete_ticket(ticket_id: int, db: Session = Depends(get_db)):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+
+    if ticket.status != "RESOLVED":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete ticket #{ticket_id} with status '{ticket.status}'. Only tickets with status 'RESOLVED' can be deleted."
+        )
+
+    deleted_id = ticket.id
     db.delete(ticket)
     db.commit()
-    return {"message": f"Ticket #{ticket_id} deleted."}
+    return {"message": f"Resolved ticket #{deleted_id} deleted successfully."}
 
 @app.post("/api/tickets/{ticket_id}/notes", response_model=TicketResponse)
 def add_ticket_note(ticket_id: int, payload: TicketNoteCreate, db: Session = Depends(get_db)):

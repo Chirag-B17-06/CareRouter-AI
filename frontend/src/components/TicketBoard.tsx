@@ -23,6 +23,7 @@ interface TicketBoardProps {
   tickets: Ticket[];
   onSelectTicket: (ticket: Ticket) => void;
   onUpdateStatus: (ticketId: number, status: TicketStatus) => void;
+  onDeleteTicket?: (ticketId: number) => void;
   onNavigateToRecord?: () => void;
 }
 
@@ -40,6 +41,7 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
   tickets,
   onSelectTicket,
   onUpdateStatus,
+  onDeleteTicket,
   onNavigateToRecord
 }) => {
   const [selectedDept, setSelectedDept] = useState<string>('All');
@@ -291,6 +293,7 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
               ticket={ticket}
               onSelect={onSelectTicket}
               onUpdateStatus={onUpdateStatus}
+              onDelete={onDeleteTicket}
             />
           ))}
         </div>
@@ -332,6 +335,7 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
                         ticket={ticket}
                         onSelect={onSelectTicket}
                         onUpdateStatus={onUpdateStatus}
+                        onDelete={onDeleteTicket}
                       />
                     ))
                   )}

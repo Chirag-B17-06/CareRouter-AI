@@ -86,6 +86,8 @@ class AudioTranscribeResponse(BaseModel):
     audio_filename: Optional[str] = ""
     is_silent: Optional[bool] = False
     max_amplitude: Optional[float] = 0.0
+    language_uncertain: Optional[bool] = False
+    suggested_language: Optional[str] = None
 
 class AnalyticsResponse(BaseModel):
     total_calls: int
