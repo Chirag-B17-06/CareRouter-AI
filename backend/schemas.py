@@ -84,6 +84,8 @@ class AudioTranscribeResponse(BaseModel):
     transcription_confidence: float
     duration_seconds: float
     audio_filename: Optional[str] = ""
+    is_silent: Optional[bool] = False
+    max_amplitude: Optional[float] = 0.0
 
 class AnalyticsResponse(BaseModel):
     total_calls: int

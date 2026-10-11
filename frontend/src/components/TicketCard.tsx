@@ -6,13 +6,12 @@ import {
   Utensils,
   Wrench,
   ClipboardList,
-  Clock,
   User,
   Bed,
-  CheckCircle,
   ArrowRight,
   ShieldAlert,
-  MessageSquare
+  MessageSquare,
+  Languages
 } from 'lucide-react';
 import { Ticket, TicketStatus, UrgencyTier } from '../types';
 
@@ -81,6 +80,14 @@ export const TicketCard: React.FC<TicketCardProps> = ({
     }
   };
 
+  const getLanguageLabel = (lang?: string) => {
+    if (lang === 'kn') return { label: 'ಕನ್ನಡ', class: 'kannada-text bg-purple-500/10 text-purple-300 border-purple-500/30' };
+    if (lang === 'hi') return { label: 'हिन्दी', class: 'hindi-text bg-orange-500/10 text-orange-300 border-orange-500/30' };
+    return { label: 'English', class: 'bg-sky-500/10 text-sky-300 border-sky-500/30' };
+  };
+
+  const langInfo = getLanguageLabel(ticket.language);
+
   // Status Badge and Next action
   const getNextStatus = (current: TicketStatus): TicketStatus | null => {
     if (current === 'PENDING') return 'IN_PROGRESS';
@@ -121,11 +128,17 @@ export const TicketCard: React.FC<TicketCardProps> = ({
             <span className={`p-1.5 rounded-lg border flex items-center justify-center ${deptConfig.bg} ${deptConfig.color}`}>
               <DeptIcon className="w-3.5 h-3.5" />
             </span>
-            <span className="text-[11px] font-semibold text-slate-300 truncate max-w-[150px]">
+            <span className="text-[11px] font-semibold text-slate-300 truncate max-w-[130px]">
               {ticket.department}
             </span>
           </div>
-          {getUrgencyBadge(ticket.urgency)}
+
+          <div className="flex items-center gap-1.5">
+            <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold border ${langInfo.class}`}>
+              {langInfo.label}
+            </span>
+            {getUrgencyBadge(ticket.urgency)}
+          </div>
         </div>
 
         {/* Patient & Room Info */}
@@ -145,9 +158,11 @@ export const TicketCard: React.FC<TicketCardProps> = ({
           {ticket.title}
         </h3>
 
-        {/* Extracted Phone Call Raw Quote */}
+        {/* Extracted Phone Call Raw Quote in Original Script */}
         {ticket.raw_quote && (
-          <div className="p-2 rounded-md bg-slate-950/40 border-l-2 border-sky-500/60 text-slate-300 text-xs italic line-clamp-2 mb-2.5">
+          <div className={`p-2.5 rounded-md bg-slate-950/50 border-l-2 border-sky-500/70 text-slate-200 text-xs italic line-clamp-3 mb-2.5 leading-relaxed ${
+            ticket.language === 'kn' ? 'kannada-text' : ticket.language === 'hi' ? 'hindi-text' : ''
+          }`}>
             &ldquo;{ticket.raw_quote}&rdquo;
           </div>
         )}

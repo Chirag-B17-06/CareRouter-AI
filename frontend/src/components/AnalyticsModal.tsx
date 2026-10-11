@@ -8,7 +8,8 @@ import {
   Layers,
   CheckCircle2,
   TrendingUp,
-  ShieldCheck
+  ShieldCheck,
+  Languages
 } from 'lucide-react';
 import { AnalyticsData } from '../types';
 
@@ -189,6 +190,43 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
               </div>
             </div>
 
+          </div>
+
+          {/* Multilingual Voice Intake Metrics */}
+          <div>
+            <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+              <Languages className="w-3.5 h-3.5 text-sky-400" />
+              Multilingual Voice Intake (Whisper STT)
+            </h3>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-purple-500/30 flex items-center justify-between">
+                <div>
+                  <span className="text-purple-300 font-bold text-xs kannada-text block">ಕನ್ನಡ (Kannada)</span>
+                  <span className="text-[10px] text-slate-500">Local language speech</span>
+                </div>
+                <span className="text-xl font-extrabold text-purple-200">
+                  {analytics.languages_detected?.kn || 0}
+                </span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-orange-500/30 flex items-center justify-between">
+                <div>
+                  <span className="text-orange-300 font-bold text-xs hindi-text block">हिन्दी (Hindi)</span>
+                  <span className="text-[10px] text-slate-500">Devanagari script speech</span>
+                </div>
+                <span className="text-xl font-extrabold text-orange-200">
+                  {analytics.languages_detected?.hi || 0}
+                </span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-slate-950 border border-sky-500/30 flex items-center justify-between">
+                <div>
+                  <span className="text-sky-300 font-bold text-xs block">English</span>
+                  <span className="text-[10px] text-slate-500">Clinical English calls</span>
+                </div>
+                <span className="text-xl font-extrabold text-sky-200">
+                  {analytics.languages_detected?.en || 0}
+                </span>
+              </div>
+            </div>
           </div>
 
         </div>

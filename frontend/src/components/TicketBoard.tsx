@@ -11,7 +11,10 @@ import {
   Wrench,
   ClipboardList,
   Layers,
-  Inbox
+  Inbox,
+  Languages,
+  Mic,
+  RotateCcw
 } from 'lucide-react';
 import { Ticket, TicketStatus, UrgencyTier } from '../types';
 import { TicketCard } from './TicketCard';
@@ -20,6 +23,7 @@ interface TicketBoardProps {
   tickets: Ticket[];
   onSelectTicket: (ticket: Ticket) => void;
   onUpdateStatus: (ticketId: number, status: TicketStatus) => void;
+  onNavigateToRecord?: () => void;
 }
 
 const DEPARTMENTS = [
@@ -35,11 +39,13 @@ const DEPARTMENTS = [
 export const TicketBoard: React.FC<TicketBoardProps> = ({
   tickets,
   onSelectTicket,
-  onUpdateStatus
+  onUpdateStatus,
+  onNavigateToRecord
 }) => {
   const [selectedDept, setSelectedDept] = useState<string>('All');
   const [selectedUrgency, setSelectedUrgency] = useState<string>('All');
   const [selectedStatus, setSelectedStatus] = useState<string>('All');
+  const [selectedLanguage, setSelectedLanguage] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [viewMode, setViewMode] = useState<'grid' | 'kanban'>('grid');
 
@@ -54,6 +60,11 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
     if (selectedStatus !== 'All' && t.status !== selectedStatus) {
       return false;
     }
+    if (selectedLanguage !== 'All') {
+      if (selectedLanguage === 'en' && t.language && t.language !== 'en') return false;
+      if (selectedLanguage === 'kn' && t.language !== 'kn') return false;
+      if (selectedLanguage === 'hi' && t.language !== 'hi') return false;
+    }
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       const match =
@@ -61,11 +72,20 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
         t.patient_name.toLowerCase().includes(q) ||
         t.room_number.toLowerCase().includes(q) ||
         t.description.toLowerCase().includes(q) ||
-        t.assigned_to.toLowerCase().includes(q);
+        t.assigned_to.toLowerCase().includes(q) ||
+        (t.raw_quote && t.raw_quote.toLowerCase().includes(q));
       if (!match) return false;
     }
     return true;
   });
+
+  const resetFilters = () => {
+    setSelectedDept('All');
+    setSelectedUrgency('All');
+    setSelectedStatus('All');
+    setSelectedLanguage('All');
+    setSearchQuery('');
+  };
 
   // Calculate department counters
   const getDeptCount = (deptName: string) => {
@@ -113,8 +133,22 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
             />
           </div>
 
-          {/* Urgency & Status Dropdowns + View Mode Toggle */}
+          {/* Urgency, Status, Language Dropdowns + View Mode Toggle */}
           <div className="flex items-center gap-2 flex-wrap">
+            {/* Language Filter */}
+            <select
+              value={selectedLanguage}
+              onChange={(e) => setSelectedLanguage(e.target.value)}
+              id="language-filter-select"
+              aria-label="Filter by spoken language"
+              className="px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-sky-500 cursor-pointer"
+            >
+              <option value="All">All Languages</option>
+              <option value="kn">ಕನ್ನಡ (Kannada)</option>
+              <option value="hi">हिन्दी (Hindi)</option>
+              <option value="en">English</option>
+            </select>
+
             {/* Urgency Filter */}
             <select
               value={selectedUrgency}
@@ -205,17 +239,48 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
       </div>
 
       {/* Main Tickets Display */}
-      {filteredTickets.length === 0 ? (
-        <div className="p-12 text-center rounded-2xl bg-slate-900/40 border border-slate-800 flex flex-col items-center justify-center space-y-3">
-          <div className="p-3 rounded-full bg-slate-800/60 text-slate-500">
-            <Inbox className="w-8 h-8" />
+      {tickets.length === 0 ? (
+        /* Empty State when no calls exist at all */
+        <div className="p-12 text-center rounded-2xl bg-slate-900/60 border border-slate-800 flex flex-col items-center justify-center space-y-4">
+          <div className="p-4 rounded-2xl bg-sky-500/10 border border-sky-500/20 text-sky-400">
+            <Mic className="w-10 h-10" />
           </div>
-          <div>
-            <h3 className="text-base font-semibold text-slate-300">No Tickets Match Filters</h3>
-            <p className="text-xs text-slate-500 max-w-sm mt-1">
-              Try adjusting your department filter, clearing search, or process a new phone call using the button above.
+          <div className="max-w-md">
+            <h3 className="text-lg font-bold text-white">No Clinical Calls Ingested Yet</h3>
+            <p className="text-xs text-slate-400 mt-1.5 leading-relaxed">
+              Use your microphone to record real clinical conversations or upload an audio file. The AI engine transcribes Kannada, Hindi, and English into verified department tickets.
             </p>
           </div>
+          {onNavigateToRecord && (
+            <button
+              onClick={onNavigateToRecord}
+              id="empty-board-record-btn"
+              className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-bold text-xs shadow-lg shadow-red-600/20 flex items-center gap-2 active:scale-95 transition-all"
+            >
+              <Mic className="w-4 h-4" />
+              <span>Record / Ingest First Call</span>
+            </button>
+          )}
+        </div>
+      ) : filteredTickets.length === 0 ? (
+        /* Filtered Empty State */
+        <div className="p-10 text-center rounded-2xl bg-slate-900/40 border border-slate-800 flex flex-col items-center justify-center space-y-3">
+          <div className="p-3 rounded-full bg-slate-800/60 text-slate-500">
+            <Inbox className="w-7 h-7" />
+          </div>
+          <div>
+            <h3 className="text-sm font-semibold text-slate-300">No Tickets Match Your Filters</h3>
+            <p className="text-xs text-slate-500 max-w-sm mt-1">
+              Try adjusting your department, language, urgency filters or search terms.
+            </p>
+          </div>
+          <button
+            onClick={resetFilters}
+            className="px-3.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 font-medium flex items-center gap-1.5 transition-colors"
+          >
+            <RotateCcw className="w-3.5 h-3.5" />
+            <span>Reset Filters</span>
+          </button>
         </div>
       ) : viewMode === 'grid' ? (
         /* Grid View */

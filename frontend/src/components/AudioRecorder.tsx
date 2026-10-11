@@ -1,7 +1,6 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   Mic,
-  MicOff,
   Square,
   Pause,
   Play,
@@ -15,12 +14,12 @@ import {
   ArrowRight,
   ShieldAlert,
   Edit3,
-  Clock,
   User,
-  Bed,
-  Phone,
   Trash2,
-  Activity
+  Activity,
+  Volume2,
+  VolumeX,
+  Settings2
 } from 'lucide-react';
 import { uploadAndTranscribeAudio, processTranscript } from '../services/api';
 import { AudioTranscribeResult, ProcessCallResult, Ticket } from '../types';
@@ -47,6 +46,10 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const [patientName, setPatientName] = useState<string>('');
   const [roomNumber, setRoomNumber] = useState<string>('');
 
+  // Audio Device Selection
+  const [audioDevices, setAudioDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
+
   // MediaRecorder states
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [isPaused, setIsPaused] = useState<boolean>(false);
@@ -54,6 +57,11 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const [recordedAudioBlob, setRecordedAudioBlob] = useState<Blob | null>(null);
   const [recordedAudioUrl, setRecordedAudioUrl] = useState<string | null>(null);
   const [micError, setMicError] = useState<string | null>(null);
+
+  // Real-time Audio Level & Sound Detection (Web Audio API)
+  const [audioLevel, setAudioLevel] = useState<number>(0); // 0 to 100
+  const [hasDetectedSound, setHasDetectedSound] = useState<boolean>(false);
+  const [silenceWarning, setSilenceWarning] = useState<string | null>(null);
 
   // File Upload states
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
@@ -63,6 +71,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const [isTranscribing, setIsTranscribing] = useState<boolean>(false);
   const [transcribeResult, setTranscribeResult] = useState<AudioTranscribeResult | null>(null);
   const [editableTranscript, setEditableTranscript] = useState<string>('');
+  const [transcribeNotice, setTranscribeNotice] = useState<string | null>(null);
 
   // Ticket processing states
   const [isProcessingTickets, setIsProcessingTickets] = useState<boolean>(false);
@@ -73,8 +82,36 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const audioChunksRef = useRef<Blob[]>([]);
   const timerIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const audioPlayerRef = useRef<HTMLAudioElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const animFrameRef = useRef<number | null>(null);
+  const silenceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Clean up recording URL on unmount
+  // Enumerate available microphone devices
+  const loadAudioDevices = useCallback(async () => {
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return;
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter((d) => d.kind === 'audioinput');
+      setAudioDevices(audioInputs);
+      if (audioInputs.length > 0 && !selectedDeviceId) {
+        setSelectedDeviceId(audioInputs[0].deviceId);
+      }
+    } catch (err) {
+      console.warn("Could not enumerate audio devices:", err);
+    }
+  }, [selectedDeviceId]);
+
+  useEffect(() => {
+    loadAudioDevices();
+    navigator.mediaDevices?.addEventListener?.('devicechange', loadAudioDevices);
+    return () => {
+      navigator.mediaDevices?.removeEventListener?.('devicechange', loadAudioDevices);
+    };
+  }, [loadAudioDevices]);
+
+  // Clean up recording URL & audio context on unmount
   useEffect(() => {
     return () => {
       if (recordedAudioUrl) {
@@ -83,13 +120,103 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
       if (timerIntervalRef.current) {
         clearInterval(timerIntervalRef.current);
       }
+      if (silenceTimeoutRef.current) {
+        clearTimeout(silenceTimeoutRef.current);
+      }
+      if (animFrameRef.current) {
+        cancelAnimationFrame(animFrameRef.current);
+      }
+      if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        audioContextRef.current.close().catch(() => {});
+      }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((t) => t.stop());
+      }
     };
   }, [recordedAudioUrl]);
+
+  // Real-time audio level monitoring via Web Audio API
+  const setupAudioMonitoring = (stream: MediaStream) => {
+    try {
+      const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const audioCtx = new AudioCtx();
+      audioContextRef.current = audioCtx;
+
+      const analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.5;
+      analyserRef.current = analyser;
+
+      const source = audioCtx.createMediaStreamSource(stream);
+      source.connect(analyser);
+
+      const bufferLength = analyser.frequencyBinCount;
+      const dataArray = new Uint8Array(bufferLength);
+
+      let soundEverObserved = false;
+
+      const checkVolume = () => {
+        if (!analyserRef.current) return;
+        analyserRef.current.getByteFrequencyData(dataArray);
+
+        let sum = 0;
+        for (let i = 0; i < bufferLength; i++) {
+          sum += dataArray[i];
+        }
+        const avg = sum / bufferLength;
+        const normalized = Math.min(100, Math.round((avg / 128) * 100));
+        setAudioLevel(normalized);
+
+        if (normalized >= 4) {
+          soundEverObserved = true;
+          setHasDetectedSound(true);
+          setSilenceWarning(null);
+        }
+
+        animFrameRef.current = requestAnimationFrame(checkVolume);
+      };
+
+      checkVolume();
+
+      // Check if after 3.5 seconds still zero sound was observed
+      silenceTimeoutRef.current = setTimeout(() => {
+        if (!soundEverObserved) {
+          setSilenceWarning(
+            "⚠️ No audio detected: Microphone is returning zero volume. Please check your physical microphone mute switch, adjust volume in Windows Settings, or choose a different microphone device below."
+          );
+        }
+      }, 3500);
+
+    } catch (err) {
+      console.warn("Could not initialize real-time audio monitor:", err);
+    }
+  };
+
+  // Stop real-time audio monitoring
+  const teardownAudioMonitoring = () => {
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
+    if (silenceTimeoutRef.current) {
+      clearTimeout(silenceTimeoutRef.current);
+      silenceTimeoutRef.current = null;
+    }
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+      audioContextRef.current.close().catch(() => {});
+      audioContextRef.current = null;
+    }
+    setAudioLevel(0);
+  };
 
   // Start Real Microphone Recording
   const startRecording = async () => {
     setMicError(null);
+    setSilenceWarning(null);
+    setTranscribeNotice(null);
+    setHasDetectedSound(false);
     setRecordedAudioBlob(null);
+
     if (recordedAudioUrl) {
       URL.revokeObjectURL(recordedAudioUrl);
       setRecordedAudioUrl(null);
@@ -103,16 +230,36 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
         throw new Error("Your browser does not support microphone recording (MediaRecorder API).");
       }
 
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
-      });
+      // Constraints: allow device selection and clean audio
+      const audioConstraints: MediaTrackConstraints = {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: true
+      };
 
-      // Determine supported mime type
-      const mimeTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/wav'];
+      if (selectedDeviceId) {
+        audioConstraints.deviceId = { exact: selectedDeviceId };
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: audioConstraints
+      });
+      streamRef.current = stream;
+
+      // Re-query devices so labels appear if previously granted
+      loadAudioDevices();
+
+      // Setup real Web Audio API level meter
+      setupAudioMonitoring(stream);
+
+      // Determine best supported MIME type
+      const mimeTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/ogg;codecs=opus',
+        'audio/mp4',
+        'audio/wav'
+      ];
       let selectedMime = '';
       for (const mime of mimeTypes) {
         if (MediaRecorder.isTypeSupported(mime)) {
@@ -137,11 +284,21 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
         const url = URL.createObjectURL(blob);
         setRecordedAudioUrl(url);
 
-        // Stop all audio tracks to turn off the microphone hardware light
+        // Check if recording is unusually small (silence)
+        if (blob.size < 3500 && recordingSeconds >= 2) {
+          setSilenceWarning(
+            `⚠️ Small audio payload (${(blob.size / 1024).toFixed(1)} KB). If no speech was captured, verify your microphone volume in Windows Sound Settings or pick another device.`
+          );
+        }
+
+        // Teardown monitor and stop audio tracks
+        teardownAudioMonitoring();
         stream.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
       };
 
-      recorder.start(250); // Slice data every 250ms
+      // Collect data every 250ms
+      recorder.start(250);
       setIsRecording(true);
       setIsPaused(false);
       setRecordingSeconds(0);
@@ -154,9 +311,10 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     } catch (err: unknown) {
       console.error("Microphone access error:", err);
       const errMsg = (err as Error).name === 'NotAllowedError'
-        ? "Microphone permission denied. Please click the lock icon in your browser address bar and allow microphone access."
+        ? "Microphone permission denied. Click the lock icon in your browser address bar to allow microphone access."
         : `Could not access microphone: ${(err as Error).message}`;
       setMicError(errMsg);
+      teardownAudioMonitoring();
     }
   };
 
@@ -180,9 +338,17 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     }
   };
 
-  // Stop Recording
+  // Stop Recording with flush
   const stopRecording = () => {
     if (mediaRecorderRef.current && isRecording) {
+      // Flush final audio slice
+      if (mediaRecorderRef.current.state === 'recording') {
+        try {
+          mediaRecorderRef.current.requestData();
+        } catch {
+          // Ignore
+        }
+      }
       mediaRecorderRef.current.stop();
       setIsRecording(false);
       setIsPaused(false);
@@ -193,7 +359,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     }
   };
 
-  // Delete / Discard Recording
+  // Discard Recording
   const discardRecording = () => {
     if (recordedAudioUrl) {
       URL.revokeObjectURL(recordedAudioUrl);
@@ -201,6 +367,8 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     setRecordedAudioBlob(null);
     setRecordedAudioUrl(null);
     setRecordingSeconds(0);
+    setSilenceWarning(null);
+    setTranscribeNotice(null);
     setTranscribeResult(null);
     setEditableTranscript('');
     setDispatchResult(null);
@@ -210,6 +378,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setUploadError(null);
     setTranscribeResult(null);
+    setTranscribeNotice(null);
     setDispatchResult(null);
     const files = e.target.files;
     if (!files || files.length === 0) return;
@@ -231,7 +400,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     setUploadedFile(file);
   };
 
-  // Step 1: Submit Audio to faster-whisper Speech-to-Text
+  // Submit Audio to faster-whisper Speech-to-Text
   const handleTranscribeAudio = async () => {
     const audioInput = activeTab === 'record' ? recordedAudioBlob : uploadedFile;
     if (!audioInput) {
@@ -240,12 +409,20 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     }
 
     setIsTranscribing(true);
+    setTranscribeNotice(null);
     try {
       const filename = activeTab === 'record' ? 'mic_recording.webm' : (uploadedFile?.name || 'uploaded_call.webm');
       const result = await uploadAndTranscribeAudio(audioInput, selectedLanguage, filename);
       setTranscribeResult(result);
       setEditableTranscript(result.transcript);
-      soundManager.playSuccessChime();
+
+      if (!result.transcript || result.transcript.trim() === '') {
+        setTranscribeNotice(
+          "No spoken words were recognized in this audio. The recording may be silent, quiet, or your microphone input may be muted. You can replay the audio above, re-record with a different microphone, or type your conversation manually in the text box below."
+        );
+      } else {
+        soundManager.playSuccessChime();
+      }
     } catch (err: unknown) {
       console.error("Transcription error:", err);
       alert(`Transcription Failed: ${(err as Error).message}`);
@@ -254,7 +431,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     }
   };
 
-  // Step 2: Process the Reviewed Transcript into Clinical Tickets
+  // Process the Reviewed Transcript into Clinical Tickets
   const handleProcessTickets = async () => {
     if (!editableTranscript.trim()) {
       alert("Please enter or verify the conversation transcript before processing.");
@@ -289,7 +466,6 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     }
   };
 
-  // Formatting helper for mm:ss
   const formatTime = (totalSeconds: number) => {
     const mins = Math.floor(totalSeconds / 60);
     const secs = totalSeconds % 60;
@@ -397,31 +573,54 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
       <div className="p-5 sm:p-6 rounded-2xl bg-slate-900 border border-slate-800 shadow-2xl space-y-6">
         
         {/* Toggle Mode */}
-        <div className="flex border-b border-slate-800 pb-3 gap-4">
-          <button
-            onClick={() => setActiveTab('record')}
-            id="tab-microphone-record-btn"
-            className={`pb-2 text-xs font-bold transition-all flex items-center gap-2 ${
-              activeTab === 'record'
-                ? 'text-sky-400 border-b-2 border-sky-400'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Mic className="w-4 h-4" />
-            <span>Microphone Audio Recording</span>
-          </button>
-          <button
-            onClick={() => setActiveTab('upload')}
-            id="tab-audio-upload-btn"
-            className={`pb-2 text-xs font-bold transition-all flex items-center gap-2 ${
-              activeTab === 'upload'
-                ? 'text-sky-400 border-b-2 border-sky-400'
-                : 'text-slate-400 hover:text-slate-200'
-            }`}
-          >
-            <Upload className="w-4 h-4" />
-            <span>Upload Audio File</span>
-          </button>
+        <div className="flex border-b border-slate-800 pb-3 gap-4 justify-between items-center flex-wrap">
+          <div className="flex gap-4">
+            <button
+              onClick={() => setActiveTab('record')}
+              id="tab-microphone-record-btn"
+              className={`pb-2 text-xs font-bold transition-all flex items-center gap-2 ${
+                activeTab === 'record'
+                  ? 'text-sky-400 border-b-2 border-sky-400'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Mic className="w-4 h-4" />
+              <span>Microphone Audio Recording</span>
+            </button>
+            <button
+              onClick={() => setActiveTab('upload')}
+              id="tab-audio-upload-btn"
+              className={`pb-2 text-xs font-bold transition-all flex items-center gap-2 ${
+                activeTab === 'upload'
+                  ? 'text-sky-400 border-b-2 border-sky-400'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Upload className="w-4 h-4" />
+              <span>Upload Audio File</span>
+            </button>
+          </div>
+
+          {/* Microphone Device Selector Dropdown */}
+          {activeTab === 'record' && audioDevices.length > 0 && (
+            <div className="flex items-center space-x-1.5 pb-2 text-xs">
+              <Settings2 className="w-3.5 h-3.5 text-slate-400" />
+              <label htmlFor="mic-device-select" className="text-slate-400 text-[11px]">Mic:</label>
+              <select
+                id="mic-device-select"
+                value={selectedDeviceId}
+                onChange={(e) => setSelectedDeviceId(e.target.value)}
+                disabled={isRecording}
+                className="bg-slate-950 border border-slate-800 rounded-lg px-2 py-1 text-[11px] text-slate-200 max-w-[200px] truncate focus:outline-none focus:border-sky-500 disabled:opacity-50"
+              >
+                {audioDevices.map((dev, idx) => (
+                  <option key={dev.deviceId || idx} value={dev.deviceId}>
+                    {dev.label || `Microphone ${idx + 1}`}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
 
         {/* Tab 1: Microphone Recorder */}
@@ -433,6 +632,14 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
               <div className="p-3 rounded-xl bg-red-950/60 border border-red-500/40 text-red-300 text-xs flex items-start gap-2">
                 <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
                 <span>{micError}</span>
+              </div>
+            )}
+
+            {/* Silence / Zero Volume Alert Banner */}
+            {silenceWarning && (
+              <div className="p-3 rounded-xl bg-amber-950/70 border border-amber-500/50 text-amber-200 text-xs flex items-start gap-2 animate-fade-in">
+                <VolumeX className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <span>{silenceWarning}</span>
               </div>
             )}
 
@@ -470,20 +677,52 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                 {formatTime(recordingSeconds)}
               </div>
 
-              {/* Animated Waveform Visualizer */}
-              <div className="flex items-center space-x-1.5 h-8">
-                {[15, 45, 80, 30, 95, 60, 40, 75, 90, 50, 30, 70, 85, 40, 60].map((h, idx) => (
-                  <div
-                    key={idx}
-                    className={`w-1 rounded-full transition-all duration-150 ${
-                      isRecording && !isPaused ? 'bg-sky-400 animate-pulse' : 'bg-slate-800'
-                    }`}
-                    style={{
-                      height: isRecording && !isPaused ? `${h}%` : '20%',
-                      animationDelay: `${idx * 70}ms`
-                    }}
-                  />
-                ))}
+              {/* REAL LIVE AUDIO VOLUME & WAVEFORM VISUALIZER */}
+              <div className="flex flex-col items-center space-y-2 w-full max-w-xs">
+                {/* 16 Dynamic Volume Bars */}
+                <div className="flex items-end justify-center space-x-1.5 h-10 w-full">
+                  {[0.5, 0.8, 1.2, 0.7, 1.4, 0.9, 1.5, 1.0, 1.3, 0.8, 1.1, 0.6, 1.2, 0.9, 0.7, 0.4].map((scale, idx) => {
+                    // Compute height directly from real audioLevel
+                    const barHeight = isRecording && !isPaused
+                      ? Math.max(6, Math.min(100, Math.round(audioLevel * scale * 1.8)))
+                      : recordedAudioBlob
+                      ? 15
+                      : 6;
+
+                    return (
+                      <div
+                        key={idx}
+                        className={`w-1.5 rounded-full transition-all duration-75 ${
+                          isRecording && !isPaused
+                            ? audioLevel > 5
+                              ? 'bg-emerald-400'
+                              : 'bg-slate-700'
+                            : recordedAudioBlob
+                            ? 'bg-sky-500/50'
+                            : 'bg-slate-800'
+                        }`}
+                        style={{ height: `${barHeight}%` }}
+                      />
+                    );
+                  })}
+                </div>
+
+                {/* Real-time decibel feedback caption */}
+                {isRecording && !isPaused && (
+                  <div className="text-[11px] font-mono flex items-center gap-1.5">
+                    {audioLevel > 5 ? (
+                      <span className="text-emerald-400 flex items-center gap-1">
+                        <Volume2 className="w-3 h-3" />
+                        Live Voice Level: {audioLevel}%
+                      </span>
+                    ) : (
+                      <span className="text-amber-400/90 flex items-center gap-1">
+                        <VolumeX className="w-3 h-3" />
+                        Listening... (Speak into microphone)
+                      </span>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Main Record Control Buttons */}
@@ -535,38 +774,49 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
             {/* Audio Playback & Actions After Stopping */}
             {recordedAudioUrl && !isRecording && (
-              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 animate-fade-in">
-                <div className="flex items-center space-x-3 flex-1">
-                  <FileAudio className="w-6 h-6 text-sky-400 shrink-0" />
-                  <div className="w-full max-w-md">
-                    <audio
-                      ref={audioPlayerRef}
-                      src={recordedAudioUrl}
-                      controls
-                      className="w-full h-8"
-                    />
+              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2 animate-fade-in">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="flex items-center space-x-3 flex-1">
+                    <FileAudio className="w-6 h-6 text-sky-400 shrink-0" />
+                    <div className="flex-1 max-w-md">
+                      <audio
+                        ref={audioPlayerRef}
+                        src={recordedAudioUrl}
+                        controls
+                        className="w-full h-8"
+                      />
+                    </div>
+                    {recordedAudioBlob && (
+                      <span className="text-[11px] text-slate-400 font-mono hidden sm:inline">
+                        {(recordedAudioBlob.size / 1024).toFixed(1)} KB ({recordingSeconds}s)
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={discardRecording}
+                      id="discard-recording-btn"
+                      className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-red-400 hover:bg-slate-800 transition-colors"
+                      title="Discard recording"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={handleTranscribeAudio}
+                      disabled={isTranscribing}
+                      id="transcribe-recording-btn"
+                      className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs shadow-md shadow-sky-600/30 flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>{isTranscribing ? 'Transcribing with Whisper...' : 'Transcribe Audio'}</span>
+                    </button>
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 shrink-0">
-                  <button
-                    onClick={discardRecording}
-                    id="discard-recording-btn"
-                    className="p-2 rounded-lg bg-slate-900 border border-slate-800 text-slate-400 hover:text-red-400 hover:bg-slate-800 transition-colors"
-                    title="Discard recording"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={handleTranscribeAudio}
-                    disabled={isTranscribing}
-                    id="transcribe-recording-btn"
-                    className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs shadow-md shadow-sky-600/30 flex items-center gap-1.5 disabled:opacity-50"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>{isTranscribing ? 'Transcribing with Whisper...' : 'Transcribe Audio'}</span>
-                  </button>
-                </div>
+                <p className="text-[11px] text-slate-400 italic">
+                  💡 Tip: Click the play button above to listen and verify your microphone captured your voice clearly before transcribing.
+                </p>
               </div>
             )}
 
@@ -658,8 +908,31 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
               </div>
             </div>
 
+            {/* Empty Transcription Warning / Recovery */}
+            {transcribeNotice && (
+              <div className="p-3.5 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 text-xs space-y-2">
+                <div className="flex items-center gap-2 font-bold text-amber-300">
+                  <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>No Spoken Words Recognized in Audio</span>
+                </div>
+                <p className="text-[11px] leading-relaxed text-amber-200/90">
+                  {transcribeNotice}
+                </p>
+                <div className="flex items-center gap-2 pt-1">
+                  <button
+                    onClick={startRecording}
+                    className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-semibold text-xs flex items-center gap-1"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Try Recording Again</span>
+                  </button>
+                  <span className="text-[11px] text-slate-400">or type the patient's conversation directly below:</span>
+                </div>
+              </div>
+            )}
+
             <p className="text-xs text-slate-400">
-              The speech was transcribed in its native script. You can review, correct medical terms or names, then click below to generate department tickets.
+              The speech was transcribed in its native script. Review, correct medical terms or names, then click below to generate department tickets.
             </p>
 
             {/* Editable Textarea in Native Unicode Font */}
@@ -667,21 +940,23 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
               rows={4}
               value={editableTranscript}
               onChange={(e) => setEditableTranscript(e.target.value)}
-              placeholder="Speech transcript will appear here in Kannada, Hindi, or English..."
+              placeholder="Type or edit the patient conversation here (e.g., Patient Arthur in Room 314 has acute chest pain and needs assistance)..."
               className="w-full px-4 py-3 rounded-xl bg-slate-950 border border-slate-800 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-sky-500 font-sans leading-relaxed resize-none kannada-text hindi-text"
             />
 
             {/* Step 3: Trigger Multi-Request Decomposition */}
-            <div className="flex items-center justify-between pt-2">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-2">
               <span className="text-xs text-slate-500">
-                Ready to extract separate clinical tasks &amp; route to hospital departments.
+                {editableTranscript.trim()
+                  ? 'Ready to extract separate clinical tasks & route to hospital departments.'
+                  : 'Enter or transcribe text above to enable department task dispatch.'}
               </span>
 
               <button
                 onClick={handleProcessTickets}
                 disabled={isProcessingTickets || !editableTranscript.trim()}
                 id="process-verified-transcript-btn"
-                className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/30 flex items-center gap-2 disabled:opacity-50 transition-all"
+                className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/30 flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
               >
                 <Activity className="w-4 h-4" />
                 <span>{isProcessingTickets ? 'Analyzing Clinical Requests...' : 'Analyze & Dispatch Tickets'}</span>

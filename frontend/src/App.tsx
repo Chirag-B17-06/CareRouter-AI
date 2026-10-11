@@ -1,21 +1,17 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
   fetchTickets,
-  fetchScenarios,
   fetchAnalytics,
-  processCall,
   updateTicket,
-  addTicketNote,
-  resetDemoDatabase
+  addTicketNote
 } from './services/api';
-import { Ticket, Scenario, AnalyticsData, ProcessCallResult, TicketStatus } from './types';
+import { Ticket, AnalyticsData, ProcessCallResult, TicketStatus } from './types';
 import { Navbar } from './components/Navbar';
 import { EmergencyBanner } from './components/EmergencyBanner';
 import { TicketBoard } from './components/TicketBoard';
-import { CallInputModal } from './components/CallInputModal';
+import { AudioRecorder } from './components/AudioRecorder';
 import { TicketDetailModal } from './components/TicketDetailModal';
 import { AnalyticsModal } from './components/AnalyticsModal';
-import { DemoModeInfoModal } from './components/DemoModeInfoModal';
 import { soundManager } from './utils/audio';
 import {
   Activity,
@@ -23,48 +19,43 @@ import {
   CheckCircle2,
   Clock,
   Layers,
-  PhoneCall,
-  Sparkles,
-  ShieldAlert,
-  HelpCircle
+  Mic,
+  ShieldCheck,
+  Sparkles
 } from 'lucide-react';
 
 export const App: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<'board' | 'record' | 'analytics'>('board');
   const [tickets, setTickets] = useState<Ticket[]>([]);
-  const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  // Audio settings
+  // Audio alerts mute state
   const [isMuted, setIsMuted] = useState<boolean>(false);
 
   // Modals state
-  const [isCallModalOpen, setIsCallModalOpen] = useState<boolean>(false);
-  const [isAnalyticsOpen, setIsAnalyticsOpen] = useState<boolean>(false);
-  const [isInfoOpen, setIsInfoOpen] = useState<boolean>(false);
   const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
+  const [isAnalyticsOpen, setIsAnalyticsOpen] = useState<boolean>(false);
 
   // Notification toast
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
-    setTimeout(() => setToastMessage(null), 4000);
+    setTimeout(() => setToastMessage(null), 4500);
   };
 
-  // Load all initial data from backend
+  // Load all dashboard tickets & analytics from FastAPI backend
   const loadDashboardData = useCallback(async () => {
     try {
-      const [ticketsData, scenariosData, analyticsData] = await Promise.all([
+      const [ticketsData, analyticsData] = await Promise.all([
         fetchTickets(),
-        fetchScenarios(),
         fetchAnalytics()
       ]);
       setTickets(ticketsData);
-      setScenarios(scenariosData);
       setAnalytics(analyticsData);
     } catch (err) {
-      console.warn("Backend not ready or connection issue:", err);
+      console.warn("Backend connection issue:", err);
     } finally {
       setIsLoading(false);
     }
@@ -74,7 +65,7 @@ export const App: React.FC = () => {
     loadDashboardData();
   }, [loadDashboardData]);
 
-  // Audio mute toggle
+  // Audio alert toggle
   const toggleSound = () => {
     const nextMuted = !isMuted;
     setIsMuted(nextMuted);
@@ -84,7 +75,7 @@ export const App: React.FC = () => {
     }
   };
 
-  // Status progression
+  // Ticket status progression
   const handleUpdateStatus = async (ticketId: number, nextStatus: TicketStatus) => {
     try {
       const updated = await updateTicket(ticketId, { status: nextStatus });
@@ -92,56 +83,29 @@ export const App: React.FC = () => {
       if (selectedTicket && selectedTicket.id === ticketId) {
         setSelectedTicket(updated);
       }
-      showToast(`Ticket #${ticketId} status advanced to ${nextStatus.replace(/_/g, ' ')}`);
+      showToast(`Ticket #${ticketId} advanced to ${nextStatus.replace(/_/g, ' ')}`);
       soundManager.playSuccessChime();
-      // Refresh analytics in background
       fetchAnalytics().then(setAnalytics).catch(() => {});
     } catch (err) {
-      alert("Failed to update status: " + (err as Error).message);
+      alert("Failed to advance status: " + (err as Error).message);
     }
   };
 
-  // Add staff note
+  // Add clinical staff note
   const handleAddNote = async (ticketId: number, note: string, author: string) => {
     const updated = await addTicketNote(ticketId, note, author);
     setTickets((prev) => prev.map((t) => (t.id === ticketId ? updated : t)));
     setSelectedTicket(updated);
-    showToast("Clinical note logged successfully");
+    showToast("Clinical triage note logged successfully");
     soundManager.playSuccessChime();
   };
 
-  // Process incoming phone call
-  const handleProcessCall = async (payload: {
-    raw_transcript: string;
-    caller_name?: string;
-    caller_phone?: string;
-    patient_name?: string;
-    room_number?: string;
-  }): Promise<ProcessCallResult> => {
-    const result = await processCall(payload);
-    await loadDashboardData();
-    return result;
-  };
-
-  // Handle successful decomposition
-  const handleDecompositionSuccess = (result: ProcessCallResult) => {
+  // Callback when audio is successfully transcribed & processed
+  const handleAudioSuccess = (result: ProcessCallResult) => {
     showToast(
-      `Call processed! ${result.extracted_tickets.length} new tasks dispatched across hospital departments.`
+      `Call processed! Generated ${result.extracted_tickets.length} separate department tasks.`
     );
     loadDashboardData();
-  };
-
-  // Reset database with initial scenarios
-  const handleResetDb = async () => {
-    if (!window.confirm("Reset triage board and seed initial 3 clinical scenarios?")) return;
-    try {
-      await resetDemoDatabase();
-      await loadDashboardData();
-      showToast("Triage board reset and re-seeded with demo scenarios.");
-      soundManager.playSuccessChime();
-    } catch (err) {
-      alert("Failed to reset database: " + (err as Error).message);
-    }
   };
 
   // Active STAT emergency tickets
@@ -152,18 +116,22 @@ export const App: React.FC = () => {
   return (
     <div className="min-h-screen flex flex-col bg-[#060b13] text-slate-100 font-sans selection:bg-sky-500 selection:text-white">
       
-      {/* Top Navbar */}
+      {/* Top Navigation Bar */}
       <Navbar
-        onOpenCallModal={() => setIsCallModalOpen(true)}
-        onOpenAnalytics={() => setIsAnalyticsOpen(true)}
-        onOpenInfo={() => setIsInfoOpen(true)}
-        onResetDb={handleResetDb}
+        activeTab={activeTab}
+        onSelectTab={(tab) => {
+          if (tab === 'analytics') {
+            setIsAnalyticsOpen(true);
+          } else {
+            setActiveTab(tab);
+          }
+        }}
         isMuted={isMuted}
         onToggleSound={toggleSound}
         emergencyCount={activeEmergencyTickets.length}
       />
 
-      {/* Main Container */}
+      {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
         
         {/* Toast Alert Banner */}
@@ -173,123 +141,144 @@ export const App: React.FC = () => {
               <CheckCircle2 className="w-4 h-4 text-emerald-400" />
               <span>{toastMessage}</span>
             </div>
-            <button onClick={() => setToastMessage(null)} className="text-emerald-400/80 hover:text-white">
+            <button
+              onClick={() => setToastMessage(null)}
+              className="text-emerald-400/80 hover:text-white"
+            >
               &times;
             </button>
           </div>
         )}
 
-        {/* STAT Emergency Alert Banner */}
-        <EmergencyBanner
-          emergencyTickets={activeEmergencyTickets}
-          onSelectTicket={(t) => setSelectedTicket(t)}
-        />
-
-        {/* Hospital Command Center Header Ribbon */}
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
-          
-          <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 shadow-lg flex items-center space-x-3.5">
-            <div className="p-2.5 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400 shrink-0">
-              <Layers className="w-5 h-5" />
-            </div>
-            <div>
-              <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                Total Tasks
-              </span>
-              <span className="text-xl sm:text-2xl font-extrabold text-white">
-                {tickets.length}
-              </span>
-              <span className="text-[10px] text-slate-500 block">Active clinical tasks</span>
-            </div>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 shadow-lg flex items-center space-x-3.5">
-            <div className={`p-2.5 rounded-xl border shrink-0 ${
-              activeEmergencyTickets.length > 0
-                ? 'bg-red-500/10 border-red-500/30 text-red-400 animate-pulse'
-                : 'bg-slate-800/60 border-slate-700 text-slate-400'
-            }`}>
-              <AlertOctagon className="w-5 h-5" />
-            </div>
-            <div>
-              <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                STAT Rapid Response
-              </span>
-              <span className={`text-xl sm:text-2xl font-extrabold ${
-                activeEmergencyTickets.length > 0 ? 'text-red-400' : 'text-slate-300'
-              }`}>
-                {activeEmergencyTickets.length}
-              </span>
-              <span className="text-[10px] text-slate-500 block">Critical SLA under 5m</span>
-            </div>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 shadow-lg flex items-center space-x-3.5">
-            <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 shrink-0">
-              <Clock className="w-5 h-5" />
-            </div>
-            <div>
-              <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                Pending Triage
-              </span>
-              <span className="text-xl sm:text-2xl font-extrabold text-amber-300">
-                {tickets.filter((t) => t.status === 'PENDING').length}
-              </span>
-              <span className="text-[10px] text-slate-500 block">Awaiting staff pickup</span>
-            </div>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 shadow-lg flex items-center space-x-3.5">
-            <div className="p-2.5 rounded-xl bg-teal-500/10 border border-teal-500/20 text-teal-400 shrink-0">
-              <Activity className="w-5 h-5" />
-            </div>
-            <div>
-              <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
-                AI Decomposition
-              </span>
-              <span className="text-xl sm:text-2xl font-extrabold text-teal-300">
-                100%
-              </span>
-              <span className="text-[10px] text-teal-400/80 block">Zero-Key NLP Engine</span>
-            </div>
-          </div>
-
-        </div>
-
-        {/* Quick Launch Demo Scenarios Bar */}
-        <div className="p-4 rounded-2xl bg-slate-900/40 border border-slate-800/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center space-x-2">
-            <Sparkles className="w-4 h-4 text-sky-400 shrink-0" />
-            <span className="text-xs font-bold text-slate-200">
-              Instant Demo Scenarios:
-            </span>
-            <span className="text-xs text-slate-400 hidden lg:inline">
-              Simulate complex multi-request hospital calls in 1 click
-            </span>
-          </div>
-
-          <div className="flex items-center gap-2 flex-wrap">
-            {scenarios.map((sc, index) => (
+        {/* View 1: Audio Recorder & Call Intake */}
+        {activeTab === 'record' ? (
+          <div className="space-y-4 animate-fade-in">
+            <div className="flex items-center justify-between pb-2">
               <button
-                key={sc.id}
-                id={`quick-launch-${sc.id}-btn`}
-                onClick={() => setIsCallModalOpen(true)}
-                className="px-3 py-1.5 rounded-xl bg-slate-950 hover:bg-slate-800 border border-slate-800 text-xs font-medium text-slate-300 hover:text-white transition-colors flex items-center gap-1.5"
-                title={sc.description}
+                onClick={() => setActiveTab('board')}
+                className="text-xs text-sky-400 hover:text-sky-300 font-semibold flex items-center gap-1.5 transition-colors"
               >
-                <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
-                <span>Scenario {index + 1}: {sc.room_number}</span>
+                &larr; Back to Live Triage Board
               </button>
-            ))}
+            </div>
+            <AudioRecorder
+              onSuccess={handleAudioSuccess}
+              onNavigateToBoard={() => setActiveTab('board')}
+            />
           </div>
-        </div>
+        ) : (
+          /* View 2: Hospital Command Center & Triage Board */
+          <div className="space-y-6 animate-fade-in">
+            
+            {/* STAT Emergency Alert Banner */}
+            <EmergencyBanner
+              emergencyTickets={activeEmergencyTickets}
+              onSelectTicket={(t) => setSelectedTicket(t)}
+            />
 
-        {/* Main Ticket Board with Departments & Tasks */}
-        <TicketBoard
-          tickets={tickets}
-          onSelectTicket={(ticket) => setSelectedTicket(ticket)}
-          onUpdateStatus={handleUpdateStatus}
-        />
+            {/* Hospital Command Center Metrics Header */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
+              
+              <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 shadow-lg flex items-center space-x-3.5">
+                <div className="p-2.5 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400 shrink-0">
+                  <Layers className="w-5 h-5" />
+                </div>
+                <div>
+                  <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+                    Active Tasks
+                  </span>
+                  <span className="text-xl sm:text-2xl font-extrabold text-white">
+                    {tickets.length}
+                  </span>
+                  <span className="text-[10px] text-slate-500 block">Across 6 departments</span>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 shadow-lg flex items-center space-x-3.5">
+                <div className={`p-2.5 rounded-xl border shrink-0 ${
+                  activeEmergencyTickets.length > 0
+                    ? 'bg-red-500/10 border-red-500/30 text-red-400 animate-pulse'
+                    : 'bg-slate-800/60 border-slate-700 text-slate-400'
+                }`}>
+                  <AlertOctagon className="w-5 h-5" />
+                </div>
+                <div>
+                  <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+                    STAT Response
+                  </span>
+                  <span className={`text-xl sm:text-2xl font-extrabold ${
+                    activeEmergencyTickets.length > 0 ? 'text-red-400' : 'text-slate-300'
+                  }`}>
+                    {activeEmergencyTickets.length}
+                  </span>
+                  <span className="text-[10px] text-slate-500 block">Critical under 5m</span>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 shadow-lg flex items-center space-x-3.5">
+                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/20 text-amber-400 shrink-0">
+                  <Clock className="w-5 h-5" />
+                </div>
+                <div>
+                  <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+                    Pending Pickup
+                  </span>
+                  <span className="text-xl sm:text-2xl font-extrabold text-amber-300">
+                    {tickets.filter((t) => t.status === 'PENDING').length}
+                  </span>
+                  <span className="text-[10px] text-slate-500 block">Awaiting triage</span>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 shadow-lg flex items-center space-x-3.5">
+                <div className="p-2.5 rounded-xl bg-teal-500/10 border border-teal-500/20 text-teal-400 shrink-0">
+                  <Activity className="w-5 h-5" />
+                </div>
+                <div>
+                  <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+                    Calls Ingested
+                  </span>
+                  <span className="text-xl sm:text-2xl font-extrabold text-teal-300">
+                    {analytics?.total_calls || 0}
+                  </span>
+                  <span className="text-[10px] text-teal-400/80 block">Faster-Whisper STT</span>
+                </div>
+              </div>
+
+            </div>
+
+            {/* Quick Action Banner */}
+            <div className="p-4 rounded-2xl bg-slate-900/40 border border-slate-800/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center space-x-2">
+                <Sparkles className="w-4 h-4 text-sky-400 shrink-0" />
+                <span className="text-xs font-bold text-slate-200">
+                  Multilingual Clinical Voice Intake:
+                </span>
+                <span className="text-xs text-slate-400 hidden sm:inline">
+                  Record real voice or upload audio in Kannada (ಕನ್ನಡ), Hindi (हिन्दी), or English
+                </span>
+              </div>
+
+              <button
+                onClick={() => setActiveTab('record')}
+                id="board-quick-record-btn"
+                className="px-4 py-2 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-bold text-xs shadow-lg shadow-red-600/20 flex items-center gap-1.5 self-start sm:self-auto transition-all"
+              >
+                <Mic className="w-3.5 h-3.5" />
+                <span>Record New Call</span>
+              </button>
+            </div>
+
+            {/* Live Triage Board */}
+            <TicketBoard
+              tickets={tickets}
+              onSelectTicket={(ticket) => setSelectedTicket(ticket)}
+              onUpdateStatus={handleUpdateStatus}
+              onNavigateToRecord={() => setActiveTab('record')}
+            />
+
+          </div>
+        )}
 
       </main>
 
@@ -299,25 +288,16 @@ export const App: React.FC = () => {
           <div className="flex items-center space-x-2">
             <span className="font-semibold text-slate-400">CareRouter AI</span>
             <span>&bull;</span>
-            <span>Hospital Clinical Call-to-Task Dispatch System</span>
+            <span>Multilingual Clinical Voice-to-Task Dispatch</span>
           </div>
           <div className="flex items-center space-x-3 text-[11px]">
             <span className="px-2 py-0.5 rounded bg-sky-950/60 border border-sky-800 text-sky-400">
-              Demo Mode: Zero-Key Local NLP Active
+              Faster-Whisper &bull; Kannada &bull; Hindi &bull; English
             </span>
-            <span>SQLite &bull; FastAPI &bull; React TypeScript</span>
+            <span>FastAPI &bull; SQLite &bull; React TypeScript</span>
           </div>
         </div>
       </footer>
-
-      {/* Ingestion & AI Decomposition Modal */}
-      <CallInputModal
-        isOpen={isCallModalOpen}
-        onClose={() => setIsCallModalOpen(false)}
-        scenarios={scenarios}
-        onProcessCall={handleProcessCall}
-        onSuccess={handleDecompositionSuccess}
-      />
 
       {/* Ticket Details & Notes Modal */}
       <TicketDetailModal
@@ -334,13 +314,8 @@ export const App: React.FC = () => {
         analytics={analytics}
       />
 
-      {/* Zero-Key Demo Architecture Modal */}
-      <DemoModeInfoModal
-        isOpen={isInfoOpen}
-        onClose={() => setIsInfoOpen(false)}
-      />
-
     </div>
   );
 };
+
 export default App;

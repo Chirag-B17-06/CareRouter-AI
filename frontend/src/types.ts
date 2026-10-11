@@ -55,6 +55,8 @@ export interface AudioTranscribeResult {
   transcription_confidence: number;
   duration_seconds: number;
   audio_filename?: string;
+  is_silent?: boolean;
+  max_amplitude?: number;
 }
 
 export interface AnalyticsData {

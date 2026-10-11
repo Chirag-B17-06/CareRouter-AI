@@ -53,6 +53,14 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
 
   const isStat = ticket.urgency === 'STAT_EMERGENCY';
 
+  const getLanguageLabel = (lang?: string) => {
+    if (lang === 'kn') return { label: 'ಕನ್ನಡ (Kannada)', class: 'kannada-text bg-purple-500/20 text-purple-300 border-purple-500/40' };
+    if (lang === 'hi') return { label: 'हिन्दी (Hindi)', class: 'hindi-text bg-orange-500/20 text-orange-300 border-orange-500/40' };
+    return { label: 'English', class: 'bg-sky-500/20 text-sky-300 border-sky-500/40' };
+  };
+
+  const langInfo = getLanguageLabel(ticket.language);
+
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto bg-black/80 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 animate-fade-in">
       <div className="relative w-full max-w-3xl bg-slate-900 border border-slate-700/80 rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[92vh]">
@@ -69,6 +77,9 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
                   : 'bg-sky-500/20 text-sky-300 border-sky-500/40'
               }`}>
                 {ticket.urgency.replace(/_/g, ' ')}
+              </span>
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded border ${langInfo.class}`}>
+                {langInfo.label}
               </span>
               <span className="text-xs text-slate-400">
                 Ticket #{ticket.id} &bull; Call Ref #{ticket.call_id || 1}
@@ -154,10 +165,22 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
               <FileText className="w-3.5 h-3.5 text-sky-400" />
               Source Voice Context &amp; Decomposed Sentence
             </h4>
-            <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-sm leading-relaxed space-y-2">
-              <div className="p-3 rounded-lg bg-sky-950/30 border-l-4 border-sky-400 text-sky-200 font-mono text-xs">
+            <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-sm leading-relaxed space-y-2.5">
+              <div className={`p-3 rounded-lg bg-sky-950/30 border-l-4 border-sky-400 text-slate-100 text-xs leading-relaxed ${
+                ticket.language === 'kn' ? 'kannada-text' : ticket.language === 'hi' ? 'hindi-text' : ''
+              }`}>
                 &ldquo;{ticket.raw_quote || ticket.description}&rdquo;
               </div>
+
+              {ticket.translated_quote && ticket.language !== 'en' && (
+                <div className="p-3 rounded-lg bg-slate-900/80 border border-slate-800 text-slate-300 text-xs">
+                  <span className="text-[10px] uppercase font-bold text-sky-400 block mb-1">
+                    English Clinical Translation:
+                  </span>
+                  &ldquo;{ticket.translated_quote}&rdquo;
+                </div>
+              )}
+
               {fullTranscript && (
                 <div className="text-xs text-slate-400 mt-2">
                   <span className="font-semibold text-slate-300">Full Ingested Transcript:</span>

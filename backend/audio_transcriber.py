@@ -62,7 +62,8 @@ def transcribe_audio_file(
 ) -> Dict[str, Any]:
     """
     Transcribes audio using faster-whisper with Kannada, Hindi, and English support.
-    Returns transcript text, detected language, confidence score, and duration.
+    Includes silence detection and robust VAD fallback.
+    Returns transcript text, detected language, confidence score, duration, and silence status.
     """
     model = get_whisper_model()
 
@@ -79,12 +80,32 @@ def transcribe_audio_file(
         else:
             lang_code = pref
 
+    # Step A: Check audio amplitude using PyAV to detect complete silence
+    max_amplitude = 0.0
     try:
+        import av, numpy as np
+        with av.open(str(file_path), mode="r", metadata_errors="ignore") as container:
+            if container.streams.audio:
+                for frame in container.decode(audio=0):
+                    arr = frame.to_ndarray()
+                    frame_max = float(np.max(np.abs(arr)))
+                    if frame_max > max_amplitude:
+                        max_amplitude = frame_max
+    except Exception as e:
+        logger.warning(f"Could not inspect audio amplitude: {e}")
+
+    is_silent = (max_amplitude < 0.001)
+    if is_silent:
+        logger.info(f"Audio file '{file_path.name}' appears completely silent (max amplitude: {max_amplitude:.5f}).")
+
+    try:
+        # Step B: Transcribe with faster-whisper
+        # Use beam_size=5 for quality; pass vad_filter=True initially
         segments, info = model.transcribe(
             str(file_path),
             language=lang_code,
             beam_size=5,
-            vad_filter=True, # Voice activity detection to trim silence
+            vad_filter=True,
             vad_parameters=dict(min_silence_duration_ms=500)
         )
 
@@ -101,14 +122,37 @@ def transcribe_audio_file(
                     "end": round(seg.end, 2),
                     "text": text_part
                 })
-                # seg.avg_logprob can be converted to an estimated probability
-                # e^logprob gives probability approximation
                 if hasattr(seg, 'avg_logprob'):
                     import math
                     prob = max(0.0, min(1.0, math.exp(seg.avg_logprob)))
                     confidences.append(prob)
 
         full_transcript = " ".join(full_text_parts).strip()
+
+        # Step C: Fallback pass if VAD filtered out everything but audio had sound
+        if not full_transcript and not is_silent and hasattr(info, "duration") and info.duration > 1.0:
+            logger.info("First VAD pass returned empty on non-silent audio; running fallback without VAD...")
+            segments_fallback, info = model.transcribe(
+                str(file_path),
+                language=lang_code,
+                beam_size=5,
+                vad_filter=False
+            )
+            for seg in segments_fallback:
+                text_part = seg.text.strip()
+                if text_part:
+                    full_text_parts.append(text_part)
+                    segment_list.append({
+                        "start": round(seg.start, 2),
+                        "end": round(seg.end, 2),
+                        "text": text_part
+                    })
+                    if hasattr(seg, 'avg_logprob'):
+                        import math
+                        prob = max(0.0, min(1.0, math.exp(seg.avg_logprob)))
+                        confidences.append(prob)
+            full_transcript = " ".join(full_text_parts).strip()
+
         detected_lang = info.language if info.language else (lang_code or "en")
         lang_prob = round(info.language_probability, 3) if hasattr(info, "language_probability") and info.language_probability else 0.95
         avg_confidence = round(sum(confidences) / len(confidences), 3) if confidences else lang_prob
@@ -121,9 +165,12 @@ def transcribe_audio_file(
             "language_confidence": lang_prob,
             "transcription_confidence": avg_confidence,
             "duration_seconds": duration_sec,
-            "segments": segment_list
+            "segments": segment_list,
+            "is_silent": is_silent,
+            "max_amplitude": round(max_amplitude, 4)
         }
 
     except Exception as e:
         logger.error(f"Error during audio transcription: {e}")
         raise RuntimeError(f"Transcription failed: {str(e)}")
+
