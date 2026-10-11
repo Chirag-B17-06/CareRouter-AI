@@ -16,6 +16,8 @@ export interface Ticket {
   title: string;
   description: string;
   raw_quote?: string;
+  translated_quote?: string;
+  language?: string;
   urgency: UrgencyTier;
   status: TicketStatus;
   clinical_flags: string[];
@@ -35,25 +37,24 @@ export interface Call {
   patient_name: string;
   room_number: string;
   raw_transcript: string;
+  language: string;
+  language_confidence: number;
+  translated_transcript?: string;
   summary: string;
+  audio_filename?: string;
   created_at: string;
   status: string;
   tickets?: Ticket[];
 }
 
-export interface Scenario {
-  id: string;
-  title: string;
-  category: string;
-  caller_name: string;
-  relationship: string;
-  patient_name: string;
-  room_number: string;
-  bed: string;
+export interface AudioTranscribeResult {
   transcript: string;
-  expected_requests_count: number;
-  urgency_tier: UrgencyTier;
-  description: string;
+  language: string;
+  language_name: string;
+  language_confidence: number;
+  transcription_confidence: number;
+  duration_seconds: number;
+  audio_filename?: string;
 }
 
 export interface AnalyticsData {
@@ -69,6 +70,7 @@ export interface AnalyticsData {
   department_distribution: Record<string, number>;
   urgency_distribution: Record<string, number>;
   status_distribution: Record<string, number>;
+  languages_detected?: Record<string, number>;
   avg_triage_latency_ms: number;
   system_mode: string;
 }

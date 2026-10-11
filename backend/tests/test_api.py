@@ -1,18 +1,18 @@
 import os
 import pytest
+import io
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
-# Import from backend
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from database import Base, get_db
-from main import app, seed_initial_demo_data
+from main import app
 
-# Use in-memory SQLite with StaticPool so all connections share the same memory instance
+# In-memory SQLite for test isolation
 SQLALCHEMY_DATABASE_URL = "sqlite:///:memory:"
 test_engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
@@ -33,9 +33,6 @@ app.dependency_overrides[get_db] = override_get_db
 @pytest.fixture(autouse=True)
 def setup_database():
     Base.metadata.create_all(bind=test_engine)
-    db = TestingSessionLocal()
-    seed_initial_demo_data(db)
-    db.close()
     yield
     Base.metadata.drop_all(bind=test_engine)
 
@@ -46,39 +43,78 @@ def test_health_check():
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "healthy"
-    assert data["demo_mode"] is True
+    assert data["stt_engine"] == "faster-whisper"
+    assert "kn" in data["supported_languages"]
+    assert "hi" in data["supported_languages"]
+    assert "en" in data["supported_languages"]
 
-def test_get_scenarios():
-    response = client.get("/api/scenarios")
-    assert response.status_code == 200
-    scenarios = response.json()
-    assert len(scenarios) == 3
-    assert scenarios[0]["id"] == "scenario-1"
-    assert scenarios[1]["id"] == "scenario-2"
-    assert scenarios[2]["id"] == "scenario-3"
+def test_empty_state_initial():
+    """Verify that dashboard starts completely empty with 0 fake calls and 0 fake tickets."""
+    calls_resp = client.get("/api/calls")
+    assert calls_resp.status_code == 200
+    assert len(calls_resp.json()) == 0
 
-def test_process_scenario_1_decomposition():
+    tickets_resp = client.get("/api/tickets")
+    assert tickets_resp.status_code == 200
+    assert len(tickets_resp.json()) == 0
+
+    analytics_resp = client.get("/api/analytics")
+    assert analytics_resp.status_code == 200
+    analytics = analytics_resp.json()
+    assert analytics["total_calls"] == 0
+    assert analytics["total_tickets"] == 0
+    assert analytics["emergency_count"] == 0
+
+def test_audio_validation_empty_file():
+    """Uploading an empty 0-byte audio file must be rejected with 400 Bad Request."""
+    empty_file = io.BytesIO(b"")
+    response = client.post(
+        "/api/audio/transcribe",
+        files={"audio_file": ("test.webm", empty_file, "audio/webm")},
+        data={"language": "auto"}
+    )
+    assert response.status_code == 400
+    assert "empty" in response.json()["detail"].lower()
+
+def test_audio_validation_invalid_format():
+    """Uploading non-audio files must be rejected with 400 Bad Request."""
+    fake_txt = io.BytesIO(b"Hello world text file")
+    response = client.post(
+        "/api/audio/transcribe",
+        files={"audio_file": ("document.txt", fake_txt, "text/plain")},
+        data={"language": "en"}
+    )
+    assert response.status_code == 400
+    assert "unsupported audio format" in response.json()["detail"].lower()
+
+def test_audio_validation_oversized():
+    """Audio files larger than 25MB must be rejected."""
+    # We test the validator directly
+    from audio_transcriber import validate_audio_file
+    with pytest.raises(ValueError, match="exceeds the maximum limit"):
+        validate_audio_file("huge.wav", 30 * 1024 * 1024)
+
+def test_process_english_multi_intent_and_stat():
+    """Test real multi-intent extraction with STAT emergency in English."""
     payload = {
-        "caller_name": "Sarah Pendelton",
-        "caller_phone": "+1 555-0199",
+        "caller_name": "Sarah",
         "patient_name": "Arthur Pendelton",
         "room_number": "Room 314",
         "raw_transcript": (
-            "Hi, this is Sarah calling about my father Arthur Pendelton in Room 314. "
-            "His IV machine has been beeping incessantly for twenty minutes and his left arm looks swollen and red! "
-            "Also, he hasn't received his diabetic lunch tray yet and his blood sugar might crash. "
-            "And one more thing, we need to speak with Dr. Chen regarding his discharge paperwork before 3 PM "
-            "because our medical transport is already booked."
-        )
+            "Hi, this is Sarah calling about Arthur in Room 314. "
+            "His IV machine has been beeping incessantly and his left arm looks swollen and red! "
+            "Also, he has not received his diabetic lunch tray yet and his blood sugar might drop. "
+            "And one more thing, we need to speak with Dr. Chen regarding his discharge paperwork before 3 PM."
+        ),
+        "language": "en"
     }
-    response = client.post("/api/calls/process", json=payload)
+    response = client.post("/api/calls/process-transcript", json=payload)
     assert response.status_code == 200
     data = response.json()
 
     assert data["emergency_detected"] is True
     assert len(data["extracted_tickets"]) == 3
 
-    # Check departments extracted
     departments = [t["department"] for t in data["extracted_tickets"]]
     urgencies = [t["urgency"] for t in data["extracted_tickets"]]
 
@@ -87,105 +123,186 @@ def test_process_scenario_1_decomposition():
     assert any("Dietary" in d for d in departments)
     assert any("Administration" in d for d in departments)
 
-def test_ticket_filtering_and_search():
-    # Tickets are already seeded
-    response = client.get("/api/tickets?urgency=STAT_EMERGENCY")
-    assert response.status_code == 200
-    tickets = response.json()
-    assert len(tickets) > 0
-    for t in tickets:
-        assert t["urgency"] == "STAT_EMERGENCY"
-
-    # Search by room number
-    resp_search = client.get("/api/tickets?search=314")
-    assert resp_search.status_code == 200
-    search_tickets = resp_search.json()
-    assert len(search_tickets) > 0
-    for t in search_tickets:
-        assert "314" in t["room_number"] or "314" in t["title"] or "314" in t["description"]
-
-def test_ticket_status_update_and_audit_trail():
-    # Get a ticket
-    resp = client.get("/api/tickets")
-    tickets = resp.json()
-    ticket_id = tickets[0]["id"]
-
-    # Update status to RESOLVED
-    update_resp = client.patch(f"/api/tickets/{ticket_id}", json={
-        "status": "RESOLVED",
-        "assigned_to": "Nurse Specialist Jackson"
-    })
-    assert update_resp.status_code == 200
-    updated = update_resp.json()
-    assert updated["status"] == "RESOLVED"
-    assert updated["assigned_to"] == "Nurse Specialist Jackson"
-
-    # Check audit log recorded
-    assert len(updated["audit_logs"]) >= 1
-    assert any("RESOLVED" in a["note"] for a in updated["audit_logs"])
-
-def test_add_ticket_note():
-    resp = client.get("/api/tickets")
-    ticket_id = resp.json()[0]["id"]
-
-    note_resp = client.post(f"/api/tickets/{ticket_id}/notes", json={
-        "note": "IV line inspected. Catheter replaced. Swelling subsided.",
-        "author": "Dr. Miller"
-    })
-    assert note_resp.status_code == 200
-    ticket = note_resp.json()
-    assert "Dr. Miller" in ticket["triage_notes"]
-    assert "Swelling subsided" in ticket["triage_notes"]
-
-def test_analytics_metrics():
-    response = client.get("/api/analytics")
+def test_process_hindi_multi_intent_and_devanagari_script():
+    """Test real multi-intent extraction with Hindi Devanagari script preservation and STAT emergency."""
+    payload = {
+        "caller_name": "Rajesh Kumar",
+        "patient_name": "Suresh Kumar",
+        "room_number": "कमरा 108",
+        "raw_transcript": (
+            "नमस्ते, मैं कमरा 108 से बोल रहा हूँ। "
+            "मरीज के सीने में बहुत तेज दर्द हो रहा है और सांस लेने में तकलीफ है! "
+            "इसके अलावा उन्हें दोपहर का खाना अभी तक नहीं मिला है और भूख लगी है। "
+            "साथ ही डिस्चार्ज के कागजात के बारे में डॉक्टर से बात करनी है।"
+        ),
+        "language": "hi"
+    }
+    response = client.post("/api/calls/process-transcript", json=payload)
     assert response.status_code == 200
     data = response.json()
-    assert data["total_calls"] >= 3
-    assert data["total_tickets"] >= 9
-    assert data["emergency_count"] >= 1
-    assert "Rapid Response & Critical Nursing" in data["department_distribution"]
 
-def test_scenario_2_decomposition():
-    sc2 = client.get("/api/scenarios").json()[1]
-    response = client.post("/api/calls/process", json={
-        "caller_name": sc2["caller_name"],
-        "patient_name": sc2["patient_name"],
-        "room_number": sc2["room_number"],
-        "raw_transcript": sc2["transcript"]
-    })
-    assert response.status_code == 200
-    data = response.json()
-    assert len(data["extracted_tickets"]) == 3
-    departments = [t["department"] for t in data["extracted_tickets"]]
-    assert any("Pharmacy" in d for d in departments)
-    assert any("Nursing" in d for d in departments)
-
-def test_scenario_3_decomposition_and_fall_stat():
-    sc3 = client.get("/api/scenarios").json()[2]
-    response = client.post("/api/calls/process", json={
-        "caller_name": sc3["caller_name"],
-        "patient_name": sc3["patient_name"],
-        "room_number": sc3["room_number"],
-        "raw_transcript": sc3["transcript"]
-    })
-    assert response.status_code == 200
-    data = response.json()
     assert data["emergency_detected"] is True
-    assert any("ACTIVE_FALL_RISK" in t["clinical_flags"] for t in data["extracted_tickets"])
-    assert any("ENVIRONMENTAL_SLIP_HAZARD" in t["clinical_flags"] for t in data["extracted_tickets"])
+    assert data["call"]["language"] == "hi"
+    assert len(data["extracted_tickets"]) == 3
 
-def test_custom_call_extraction():
-    custom_transcript = (
-        "Good morning triage desk, this is nurse Kelly calling regarding patient Marcus Bell in Room 502. "
-        "The patient is experiencing intense nausea and vomiting after his chemotherapy infusion. "
-        "Also, the bathroom faucet in 502 is leaking heavily all over the floor."
-    )
-    response = client.post("/api/calls/process", json={
-        "raw_transcript": custom_transcript
-    })
+    # Check Devanagari script is preserved in raw_quote
+    quotes = [t["raw_quote"] for t in data["extracted_tickets"]]
+    assert any("सीने में बहुत तेज दर्द" in q for q in quotes)
+    assert any("दोपहर का खाना" in q for q in quotes)
+    assert any("डिस्चार्ज" in q for q in quotes)
+
+    departments = [t["department"] for t in data["extracted_tickets"]]
+    assert "Rapid Response & Critical Nursing" in departments
+    assert any("Dietary" in d for d in departments)
+    assert any("Administration" in d for d in departments)
+
+def test_process_kannada_multi_intent_and_kannada_script():
+    """Test real multi-intent extraction with Kannada script preservation and STAT emergency."""
+    payload = {
+        "caller_name": "Manjunath",
+        "patient_name": "Ramesh",
+        "room_number": "ಕೋಣೆ 422",
+        "raw_transcript": (
+            "ನಮಸ್ಕಾರ, ಇದು ಕೋಣೆ 422 ರಿಂದ ಕರೆ ಮಾಡುತ್ತಿದ್ದೇನೆ. "
+            "ರೋಗಿಗೆ ಎದೆ ನೋವು ತುಂಬಾ ಜಾಸ್ತಿ ಇದೆ ಮತ್ತು ಉಸಿರಾಟದ ತೊಂದರೆ ಇದೆ! "
+            "ಹಾಗೆಯೇ ಅವರ ಬಿಪಿ ಮಾತ್ರೆಗಳ ಬಗ್ಗೆ ಫಾರ್ಮಸಿ ಜೊತೆ ಮಾತನಾಡಬೇಕು. "
+            "ಜೊತೆಗೆ ಕೊಠಡಿಯಲ್ಲಿ ನೆಲದ ಮೇಲೆ ನೀರು ಬಿದ್ದಿದೆ ಸ್ವಚ್ಛತೆ ಮಾಡಬೇಕು."
+        ),
+        "language": "kn"
+    }
+    response = client.post("/api/calls/process-transcript", json=payload)
     assert response.status_code == 200
     data = response.json()
-    assert data["call"]["patient_name"] == "Marcus Bell"
-    assert data["call"]["room_number"] == "Room 502"
-    assert len(data["extracted_tickets"]) >= 2
+
+    assert data["emergency_detected"] is True
+    assert data["call"]["language"] == "kn"
+    assert len(data["extracted_tickets"]) == 3
+
+    # Check Kannada script is preserved in raw_quote
+    quotes = [t["raw_quote"] for t in data["extracted_tickets"]]
+    assert any("ಎದೆ ನೋವು" in q for q in quotes)
+    assert any("ಮಾತ್ರೆಗಳ" in q for q in quotes)
+    assert any("ನೆಲದ ಮೇಲೆ ನೀರು" in q for q in quotes)
+
+    departments = [t["department"] for t in data["extracted_tickets"]]
+    assert "Rapid Response & Critical Nursing" in departments
+    assert any("Pharmacy" in d for d in departments)
+    assert any("Facilities" in d for d in departments)
+
+def test_emergency_negation_handling_english():
+    """Symptom keywords that are explicitly negated must NOT trigger a STAT Emergency."""
+    payload = {
+        "caller_name": "David",
+        "patient_name": "Mary",
+        "room_number": "Room 205",
+        "raw_transcript": (
+            "Patient has a mild tension headache, but denies chest pain and has no shortness of breath. "
+            "Also can we get an extra pillow and water pitcher?"
+        ),
+        "language": "en"
+    }
+    response = client.post("/api/calls/process-transcript", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+
+    # Emergency should be FALSE because chest pain and shortness of breath are negated
+    assert data["emergency_detected"] is False
+    for t in data["extracted_tickets"]:
+        assert t["urgency"] != "STAT_EMERGENCY"
+
+def test_emergency_negation_handling_hindi():
+    """Hindi negation ('सीने में दर्द नहीं है') must NOT trigger STAT emergency."""
+    payload = {
+        "caller_name": "Pooja",
+        "patient_name": "Sunita",
+        "room_number": "कमरा 302",
+        "raw_transcript": (
+            "मरीज को थोड़ा चक्कर आ रहा है, लेकिन सीने में दर्द नहीं है। "
+            "कृपया नर्स को बीपी चेक करने के लिए भेजें।"
+        ),
+        "language": "hi"
+    }
+    response = client.post("/api/calls/process-transcript", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["emergency_detected"] is False
+
+def test_emergency_negation_handling_kannada():
+    """Kannada negation ('ಎದೆ ನೋವು ಇಲ್ಲ') must NOT trigger STAT emergency."""
+    payload = {
+        "caller_name": "Sunil",
+        "patient_name": "Anand",
+        "room_number": "ಕೋಣೆ 105",
+        "raw_transcript": (
+            "ರೋಗಿಗೆ ಎದೆ ನೋವು ಇಲ್ಲ, ಆದರೆ ಸ್ವಲ್ಪ ಸುಸ್ತು ಅನಿಸುತ್ತಿದೆ. "
+            "ದಯವಿಟ್ಟು ನರ್ಸ್ ಬಂದು ನೋಡಿ."
+        ),
+        "language": "kn"
+    }
+    response = client.post("/api/calls/process-transcript", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["emergency_detected"] is False
+
+def test_duplicate_submission_guard():
+    """Submitting the exact same transcript twice immediately should return existing call without duplicating."""
+    payload = {
+        "caller_name": "Caller A",
+        "patient_name": "Patient A",
+        "room_number": "Room 501",
+        "raw_transcript": "Patient requests pain medication refill and lunch tray.",
+        "language": "en"
+    }
+    res1 = client.post("/api/calls/process-transcript", json=payload)
+    assert res1.status_code == 200
+    id1 = res1.json()["call"]["id"]
+
+    res2 = client.post("/api/calls/process-transcript", json=payload)
+    assert res2.status_code == 200
+    id2 = res2.json()["call"]["id"]
+
+    assert id1 == id2
+    # Check total calls count remains 1
+    calls = client.get("/api/calls").json()
+    assert len(calls) == 1
+
+def test_ticket_status_update_and_notes():
+    """Test advancing status from PENDING to IN_PROGRESS to RESOLVED and adding triage notes."""
+    payload = {
+        "raw_transcript": "Patient in Room 102 needs antibiotic allergy verification before evening dose."
+    }
+    res = client.post("/api/calls/process-transcript", json=payload)
+    ticket_id = res.json()["extracted_tickets"][0]["id"]
+
+    # Update status
+    patch_res = client.patch(f"/api/tickets/{ticket_id}", json={
+        "status": "IN_PROGRESS",
+        "assigned_to": "Pharmacist Dr. Rao"
+    })
+    assert patch_res.status_code == 200
+    assert patch_res.json()["status"] == "IN_PROGRESS"
+    assert patch_res.json()["assigned_to"] == "Pharmacist Dr. Rao"
+
+    # Add clinical note
+    note_res = client.post(f"/api/tickets/{ticket_id}/notes", json={
+        "note": "Cross-checked with EHR: No active penicillin allergy found.",
+        "author": "Dr. Rao"
+    })
+    assert note_res.status_code == 200
+    assert "Dr. Rao" in note_res.json()["triage_notes"]
+
+def test_delete_call_and_tickets():
+    """Test deleting a call record and verifying its tickets are removed."""
+    payload = {
+        "raw_transcript": "Test call to be deleted soon. Patient needs water pitcher."
+    }
+    res = client.post("/api/calls/process-transcript", json=payload)
+    call_id = res.json()["call"]["id"]
+
+    # Delete call
+    del_res = client.delete(f"/api/calls/{call_id}")
+    assert del_res.status_code == 200
+
+    # Verify call and tickets are gone
+    assert len(client.get("/api/calls").json()) == 0
+    assert len(client.get("/api/tickets").json()) == 0

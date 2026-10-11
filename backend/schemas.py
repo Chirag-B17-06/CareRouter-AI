@@ -7,7 +7,11 @@ class CallCreate(BaseModel):
     caller_phone: Optional[str] = ""
     patient_name: Optional[str] = "Unknown Patient"
     room_number: Optional[str] = "Unassigned"
-    raw_transcript: str = Field(..., min_length=5, description="Full telephone conversation transcript")
+    raw_transcript: str = Field(..., min_length=2, description="Speech transcript in original language")
+    language: Optional[str] = "en"
+    language_confidence: Optional[float] = 1.0
+    translated_transcript: Optional[str] = ""
+    audio_filename: Optional[str] = ""
 
 class AuditLogResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -25,6 +29,8 @@ class TicketResponse(BaseModel):
     title: str
     description: str
     raw_quote: Optional[str] = ""
+    translated_quote: Optional[str] = ""
+    language: Optional[str] = "en"
     urgency: str
     status: str
     clinical_flags: List[str] = []
@@ -54,7 +60,11 @@ class CallResponse(BaseModel):
     patient_name: str
     room_number: str
     raw_transcript: str
+    language: str
+    language_confidence: float
+    translated_transcript: Optional[str] = ""
     summary: str
+    audio_filename: Optional[str] = ""
     created_at: datetime
     status: str
     tickets: List[TicketResponse] = []
@@ -66,19 +76,14 @@ class ProcessCallResponse(BaseModel):
     summary: str
     engine_used: str
 
-class ScenarioResponse(BaseModel):
-    id: str
-    title: str
-    category: str
-    caller_name: str
-    relationship: str
-    patient_name: str
-    room_number: str
-    bed: str
+class AudioTranscribeResponse(BaseModel):
     transcript: str
-    expected_requests_count: int
-    urgency_tier: str
-    description: str
+    language: str
+    language_name: str
+    language_confidence: float
+    transcription_confidence: float
+    duration_seconds: float
+    audio_filename: Optional[str] = ""
 
 class AnalyticsResponse(BaseModel):
     total_calls: int
@@ -93,5 +98,6 @@ class AnalyticsResponse(BaseModel):
     department_distribution: Dict[str, int]
     urgency_distribution: Dict[str, int]
     status_distribution: Dict[str, int]
+    languages_detected: Dict[str, int]
     avg_triage_latency_ms: float
     system_mode: str

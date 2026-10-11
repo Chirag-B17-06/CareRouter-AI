@@ -1,7 +1,7 @@
 import os
 import json
 from datetime import datetime, timezone
-from sqlalchemy import create_engine, Column, Integer, String, Text, DateTime, ForeignKey
+from sqlalchemy import create_engine, Column, Integer, String, Text, Float, DateTime, ForeignKey
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./care_router.db")
@@ -21,8 +21,12 @@ class Call(Base):
     caller_phone = Column(String(50), default="")
     patient_name = Column(String(100), default="Unknown Patient")
     room_number = Column(String(50), default="Unassigned")
-    raw_transcript = Column(Text, nullable=False)
+    raw_transcript = Column(Text, nullable=False) # In original language (Kannada, Hindi, or English)
+    language = Column(String(20), default="en") # kn, hi, en
+    language_confidence = Column(Float, default=1.0)
+    translated_transcript = Column(Text, default="") # English translation if non-English
     summary = Column(Text, default="")
+    audio_filename = Column(String(255), default="")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     status = Column(String(50), default="processed")
 
@@ -33,10 +37,12 @@ class Ticket(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     call_id = Column(Integer, ForeignKey("calls.id"), nullable=True)
-    department = Column(String(100), nullable=False, index=True) # Rapid Response, Nursing, Pharmacy, Dietary, Administration, Facilities
+    department = Column(String(100), nullable=False, index=True)
     title = Column(String(200), nullable=False)
     description = Column(Text, nullable=False)
-    raw_quote = Column(Text, default="")
+    raw_quote = Column(Text, default="") # Quote in original language
+    translated_quote = Column(Text, default="") # English translation if applicable
+    language = Column(String(20), default="en")
     urgency = Column(String(50), nullable=False, index=True) # STAT_EMERGENCY, URGENT, ROUTINE, INQUIRY
     status = Column(String(50), default="PENDING", index=True) # PENDING, IN_PROGRESS, DISPATCHED, RESOLVED
     clinical_flags = Column(Text, default="[]") # JSON string array
@@ -62,7 +68,7 @@ class AuditLog(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     ticket_id = Column(Integer, ForeignKey("tickets.id"), nullable=False)
-    action = Column(String(100), nullable=False) # CREATED, STATUS_CHANGED, ASSIGNED, NOTE_ADDED
+    action = Column(String(100), nullable=False)
     note = Column(Text, default="")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
