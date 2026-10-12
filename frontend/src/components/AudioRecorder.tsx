@@ -25,6 +25,17 @@ import { uploadAndTranscribeAudio, processTranscript } from '../services/api';
 import { AudioTranscribeResult, ProcessCallResult, Ticket } from '../types';
 import { soundManager } from '../utils/audio';
 
+function filenameFromAudioBlob(blob: Blob, fallback: string): string {
+  const type = (blob.type || '').toLowerCase();
+  const base = fallback.replace(/\.[^.]+$/, '') || 'recording';
+  if (type.includes('wav')) return `${base}.wav`;
+  if (type.includes('mp4') || type.includes('m4a')) return `${base}.m4a`;
+  if (type.includes('ogg')) return `${base}.ogg`;
+  if (type.includes('mpeg') || type.includes('mp3')) return `${base}.mp3`;
+  if (type.includes('webm')) return `${base}.webm`;
+  return fallback;
+}
+
 interface AudioRecorderProps {
   onSuccess: (result: ProcessCallResult) => void;
   onNavigateToBoard: () => void;
@@ -141,6 +152,9 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
       const AudioCtx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
       const audioCtx = new AudioCtx();
       audioContextRef.current = audioCtx;
+      if (audioCtx.state === 'suspended') {
+        void audioCtx.resume();
+      }
 
       const analyser = audioCtx.createAnalyser();
       analyser.fftSize = 256;
@@ -298,8 +312,9 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
         streamRef.current = null;
       };
 
-      // Collect data every 250ms
-      recorder.start(250);
+      // One complete container on stop. Timesliced WebM clusters often play in
+      // Chrome but decode as empty audio in PyAV/faster-whisper.
+      recorder.start();
       setIsRecording(true);
       setIsPaused(false);
       setRecordingSeconds(0);
@@ -342,14 +357,6 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   // Stop Recording with flush
   const stopRecording = () => {
     if (mediaRecorderRef.current && isRecording) {
-      // Flush final audio slice
-      if (mediaRecorderRef.current.state === 'recording') {
-        try {
-          mediaRecorderRef.current.requestData();
-        } catch {
-          // Ignore
-        }
-      }
       mediaRecorderRef.current.stop();
       setIsRecording(false);
       setIsPaused(false);
@@ -417,7 +424,9 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     setIsTranscribing(true);
     setTranscribeNotice(null);
     try {
-      const filename = activeTab === 'record' ? 'mic_recording.webm' : (uploadedFile?.name || 'uploaded_call.webm');
+      const filename = activeTab === 'record'
+        ? filenameFromAudioBlob(audioInput, 'mic_recording.webm')
+        : (uploadedFile?.name || 'uploaded_call.webm');
       const result = await uploadAndTranscribeAudio(audioInput, langToUse, filename);
       setTranscribeResult(result);
       setEditableTranscript(result.transcript);

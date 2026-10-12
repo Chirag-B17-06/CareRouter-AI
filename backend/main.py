@@ -20,7 +20,7 @@ from schemas import (
 )
 from audio_transcriber import (
     validate_audio_file, transcribe_audio_file,
-    UPLOAD_DIR, LANGUAGE_DISPLAY_NAMES
+    UPLOAD_DIR, LANGUAGE_DISPLAY_NAMES, get_engine_status
 )
 from nlp_parser import process_real_transcript
 
@@ -93,6 +93,7 @@ def health_check():
         "service": "CareRouter AI",
         "version": "2.0.0",
         "stt_engine": "faster-whisper",
+        "engine_details": get_engine_status(),
         "supported_languages": {
             "kn": "Kannada — ಕನ್ನಡ",
             "hi": "Hindi — हिन्दी",

@@ -1,6 +1,27 @@
 import { Ticket, Call, AnalyticsData, ProcessCallResult, TicketStatus, AudioTranscribeResult } from '../types';
+import { decodeBrowserAudioToWav } from '../utils/audio';
 
 const API_BASE = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000';
+
+function filenameFromMime(mime: string, fallback: string): string {
+  const type = (mime || '').toLowerCase();
+  if (type.includes('wav')) return fallback.replace(/\.[^.]+$/, '') + '.wav';
+  if (type.includes('mp4') || type.includes('m4a')) return fallback.replace(/\.[^.]+$/, '') + '.m4a';
+  if (type.includes('ogg')) return fallback.replace(/\.[^.]+$/, '') + '.ogg';
+  if (type.includes('mpeg') || type.includes('mp3')) return fallback.replace(/\.[^.]+$/, '') + '.mp3';
+  if (type.includes('webm')) return fallback.replace(/\.[^.]+$/, '') + '.webm';
+  return fallback;
+}
+
+function formatApiErrorDetail(detail: unknown, fallback: string): string {
+  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((item) => (typeof item === 'object' && item && 'msg' in item ? String((item as { msg: unknown }).msg) : String(item)))
+      .join('; ');
+  }
+  return fallback;
+}
 
 export async function fetchHealth(): Promise<{
   status: string;
@@ -17,8 +38,20 @@ export async function uploadAndTranscribeAudio(
   language?: string,
   filename: string = 'recording.webm'
 ): Promise<AudioTranscribeResult> {
+  let payload: Blob = audioBlobOrFile;
+  let uploadName = filenameFromMime(audioBlobOrFile.type, filename);
+
+  // Re-encode in the browser to 16 kHz WAV so Whisper/PyAV is not given
+  // Chrome MediaRecorder timeslice WebM (often empty after InvalidDataError skips).
+  try {
+    payload = await decodeBrowserAudioToWav(audioBlobOrFile);
+    uploadName = uploadName.replace(/\.[^.]+$/, '') + '.wav';
+  } catch (err) {
+    console.warn('WAV re-encode failed; uploading original audio', err);
+  }
+
   const formData = new FormData();
-  formData.append('audio_file', audioBlobOrFile, filename);
+  formData.append('audio_file', payload, uploadName);
   if (language && language !== 'auto') {
     formData.append('language', language);
   }
@@ -32,7 +65,7 @@ export async function uploadAndTranscribeAudio(
     let errorMsg = 'Failed to transcribe audio';
     try {
       const errorJson = await res.json();
-      errorMsg = errorJson.detail || errorMsg;
+      errorMsg = formatApiErrorDetail(errorJson.detail, errorMsg);
     } catch {
       errorMsg = await res.text();
     }

@@ -23,8 +23,8 @@ def run_all_verifications():
     
     results = {}
 
-    # Test 1: Clear English Speech
-    eng_file = Path("backend/uploads/03c405cb02c04aa5a1b9d22bbf9d2da2.webm")
+    uploads_dir = Path(__file__).parent.parent / "uploads"
+    eng_file = uploads_dir / "03c405cb02c04aa5a1b9d22bbf9d2da2.webm"
     if eng_file.exists():
         eng_res = transcribe_audio_file(eng_file, language_preference="en")
         print("\n[1] Clear Spoken English:")
@@ -36,7 +36,7 @@ def run_all_verifications():
         results["Clear English"] = "PASSED (Exact match 'I have chest pain.')"
 
     # Test 2: Clear Spoken Kannada
-    kn_file = Path("backend/uploads/6749ae7f92844519991fd0b502b0d492.webm")
+    kn_file = uploads_dir / "6749ae7f92844519991fd0b502b0d492.webm"
     if kn_file.exists():
         kn_res = transcribe_audio_file(kn_file, language_preference="kn")
         print("\n[2] Clear Spoken Kannada:")
@@ -48,7 +48,7 @@ def run_all_verifications():
         results["Clear Kannada"] = f"PASSED (Native script: '{kn_res['transcript']}')"
 
     # Test 3 & 5: Hindi & Hindi-English Code Switching
-    hi_file = Path("backend/uploads/1a97cf8c68ac42038a8aca55dbb2df8e.webm")
+    hi_file = uploads_dir / "1a97cf8c68ac42038a8aca55dbb2df8e.webm"
     if hi_file.exists():
         hi_res = transcribe_audio_file(hi_file, language_preference="auto")
         print("\n[3 & 5] Hindi-English Code Switching:")
