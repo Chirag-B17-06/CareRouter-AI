@@ -36,6 +36,74 @@ function filenameFromAudioBlob(blob: Blob, fallback: string): string {
   return fallback;
 }
 
+const DEMO_SCENARIOS = [
+  {
+    id: 'compound-en',
+    title: 'Compound Call (English)',
+    category: 'Decomposition',
+    badge: '3 Decomposed Tasks',
+    badgeColor: 'bg-rose-500/20 text-rose-300 border-rose-500/40',
+    callerName: 'Sister Mary',
+    callerPhone: '+91 98451 23456',
+    patientName: 'Robert Fernandes',
+    roomNumber: 'Room 402',
+    language: 'en',
+    transcript: 'Patient in Room 402 with chest discomfort and shortness of breath, also requests evening meal change to diabetic diet and bill clarification before discharge tomorrow.'
+  },
+  {
+    id: 'acute-hi',
+    title: 'Acute Emergency (हिन्दी)',
+    category: 'STAT Emergency',
+    badge: '5m Crash Cart SLA',
+    badgeColor: 'bg-red-500/20 text-red-300 border-red-500/40',
+    callerName: 'Sunita (Attendant)',
+    callerPhone: '+91 91234 56789',
+    patientName: 'Rajesh Kumar',
+    roomNumber: 'कमरा 305',
+    language: 'hi',
+    transcript: 'मरीज को बहुत तेज पसीना आ रहा है और सांस लेने में भारी तकलीफ हो रही है, तुरंत आईसीयू टीम और ऑक्सीजन सिलेंडर भेजें।'
+  },
+  {
+    id: 'opd-kn',
+    title: 'OPD & Lab Follow-up (ಕನ್ನಡ)',
+    category: 'Kannada Native Script',
+    badge: 'OPD + Records',
+    badgeColor: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
+    callerName: 'ಮಂಜುನಾಥ್ (Manjunath)',
+    callerPhone: '+91 99887 76655',
+    patientName: 'ಲಕ್ಷ್ಮಿ (Lakshmi)',
+    roomNumber: 'OPD 12',
+    language: 'kn',
+    transcript: 'ನಮಸ್ಕಾರ, ಡಾ. ರಾವ್ ಅವರ ಜೊತೆ ಕಾರ್ಡಿಯಾಲಜಿ ಅಪಾಯಿಂಟ್‌ಮೆಂಟ್ ಶುಕ್ರವಾರ ಬೆಳಗ್ಗೆ ಬೇಕು, ಮತ್ತು ಹಿಂದಿನ ಬ್ಲಡ್ ಟೆಸ್ಟ್ ರಿಪೋರ್ಟ್ ಕಳಿಸಿಕೊಡಿ.'
+  },
+  {
+    id: 'negation-hinglish',
+    title: 'Safe Negation (Hinglish)',
+    category: 'Negation Safeguard',
+    badge: 'Non-Emergency',
+    badgeColor: 'bg-sky-500/20 text-sky-300 border-sky-500/40',
+    callerName: 'Aman',
+    callerPhone: '+91 94488 11223',
+    patientName: 'Mohan Lal',
+    roomNumber: 'Room 210',
+    language: 'hi',
+    transcript: 'Patient ko thoda dizziness hai, but chest pain bilkul nahi hai. Doctor ko routine BP check ke liye bolo aur ek extra pillow aur drinking water chahiye.'
+  },
+  {
+    id: 'refractory-review',
+    title: 'Clinical Review Mode',
+    category: 'Uncertainty Flag',
+    badge: 'Human Review',
+    badgeColor: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
+    callerName: 'Staff Nurse Anita',
+    callerPhone: '+91 97766 55443',
+    patientName: 'Suresh Gowda',
+    roomNumber: 'Room 108',
+    language: 'en',
+    transcript: 'Patient still has persistent chest tightness even after sorbitrate 20 minutes ago. Maybe indigestion, not sure if serious.'
+  }
+];
+
 interface AudioRecorderProps {
   onSuccess: (result: ProcessCallResult) => void;
   onNavigateToBoard: () => void;
@@ -487,6 +555,25 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const handleLoadScenario = (scenario: typeof DEMO_SCENARIOS[0]) => {
+    setCallerName(scenario.callerName);
+    setCallerPhone(scenario.callerPhone);
+    setPatientName(scenario.patientName);
+    setRoomNumber(scenario.roomNumber);
+    setSelectedLanguage(scenario.language);
+    setEditableTranscript(scenario.transcript);
+    setTranscribeResult({
+      transcript: scenario.transcript,
+      language: scenario.language,
+      language_name: scenario.language === 'kn' ? 'Kannada' : scenario.language === 'hi' ? 'Hindi' : 'English',
+      language_confidence: 0.99,
+      transcription_confidence: 0.98,
+      duration_seconds: 8.2
+    });
+    setTranscribeNotice(`Demo preset loaded: ${scenario.title}. Click 'Decompose & Dispatch Tasks' below to triage.`);
+    soundManager.playSuccessChime();
+  };
+
   return (
     <div className="max-w-4xl mx-auto space-y-6">
       
@@ -581,6 +668,50 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
               className="w-full px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-sky-500"
             />
           </div>
+        </div>
+      </div>
+
+      {/* Quick Clinical Demo Presets Bar */}
+      <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-slate-900 via-indigo-950/40 to-slate-900 border border-indigo-500/30 shadow-xl space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-indigo-400" />
+            <h3 className="text-xs font-bold text-white uppercase tracking-wider">
+              Clinical Demo Presets &bull; Instant Evaluation Scenarios
+            </h3>
+          </div>
+          <span className="text-[10px] text-indigo-300 font-semibold bg-indigo-500/20 px-2 py-0.5 rounded border border-indigo-500/30">
+            One-Click Test Cases
+          </span>
+        </div>
+        <p className="text-[11px] text-slate-400">
+          Select any real-world hospital call scenario below to auto-populate transcripts and test multilingual decomposition, negation safeguards, or clinical review without needing a microphone.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5 pt-1">
+          {DEMO_SCENARIOS.map((scenario) => (
+            <button
+              key={scenario.id}
+              onClick={() => handleLoadScenario(scenario)}
+              className="text-left p-3 rounded-xl bg-slate-950/80 hover:bg-indigo-950/60 border border-slate-800 hover:border-indigo-500/50 transition-all group flex flex-col justify-between"
+            >
+              <div>
+                <div className="flex items-center justify-between gap-1 mb-1">
+                  <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold border ${scenario.badgeColor}`}>
+                    {scenario.badge}
+                  </span>
+                </div>
+                <h4 className="text-xs font-bold text-slate-200 group-hover:text-indigo-300 transition-colors line-clamp-1">
+                  {scenario.title}
+                </h4>
+                <p className="text-[10px] text-slate-400 mt-0.5 line-clamp-2">
+                  {scenario.transcript}
+                </p>
+              </div>
+              <span className="text-[10px] font-semibold text-indigo-400 mt-2 flex items-center gap-1 group-hover:translate-x-0.5 transition-transform">
+                Load scenario &rarr;
+              </span>
+            </button>
+          ))}
         </div>
       </div>
 

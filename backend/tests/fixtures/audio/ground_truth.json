@@ -1,0 +1,65 @@
+{
+  "en_stat_emergency": {
+    "file": "c:\\Users\\Anike\\CareRouter-AI\\CareRouter-AI\\backend\\tests\\fixtures\\audio\\en_stat_emergency.wav",
+    "filename": "en_stat_emergency.wav",
+    "lang": "en",
+    "reference": "Patient Arthur in Room 314 has severe chest pain, shortness of breath, and left arm swelling.",
+    "category": "emergency"
+  },
+  "en_symptom_negated": {
+    "file": "c:\\Users\\Anike\\CareRouter-AI\\CareRouter-AI\\backend\\tests\\fixtures\\audio\\en_symptom_negated.wav",
+    "filename": "en_symptom_negated.wav",
+    "lang": "en",
+    "reference": "Patient has a mild headache, but denies chest pain and has no shortness of breath.",
+    "category": "negation"
+  },
+  "en_medical_dosage_numbers": {
+    "file": "c:\\Users\\Anike\\CareRouter-AI\\CareRouter-AI\\backend\\tests\\fixtures\\audio\\en_medical_dosage_numbers.wav",
+    "filename": "en_medical_dosage_numbers.wav",
+    "lang": "en",
+    "reference": "Please verify Dr. Rao prescription for 500 milligram Paracetamol and 50 milligram Metformin before 4 PM.",
+    "category": "medical_dosage"
+  },
+  "kn_stat_emergency": {
+    "file": "c:\\Users\\Anike\\CareRouter-AI\\CareRouter-AI\\backend\\tests\\fixtures\\audio\\kn_stat_emergency.wav",
+    "filename": "kn_stat_emergency.wav",
+    "lang": "kn",
+    "reference": "ನನಗೆ ಎದೆ ನೋವು ಮತ್ತು ಉಸಿರಾಟದ ತೊಂದರೆ ಇದೆ, ದಯವಿಟ್ಟು ವೈದ್ಯರನ್ನು ಕರೆಯಿರಿ.",
+    "category": "emergency"
+  },
+  "kn_medication_query": {
+    "file": "c:\\Users\\Anike\\CareRouter-AI\\CareRouter-AI\\backend\\tests\\fixtures\\audio\\kn_medication_query.wav",
+    "filename": "kn_medication_query.wav",
+    "lang": "kn",
+    "reference": "ರೋಗಿಗೆ ಬಿಪಿ ಮಾತ್ರೆಗಳು ಮತ್ತು 500 ಮಿಲಿಗ್ರಾಂ ಪ್ಯಾರಸಿಟಮಾಲ್ ಬೇಕು.",
+    "category": "medication"
+  },
+  "kn_code_switching": {
+    "file": "c:\\Users\\Anike\\CareRouter-AI\\CareRouter-AI\\backend\\tests\\fixtures\\audio\\kn_code_switching.wav",
+    "filename": "kn_code_switching.wav",
+    "lang": "kn",
+    "reference": "ನನ್ನ ಹೆಸರು ರಾಜೇಶ್, ಪೇಷಂಟ್ ಗೆ severe chest pain ಮತ್ತು arm swelling ಇದೆ, Room 314.",
+    "category": "code_switching"
+  },
+  "hi_stat_emergency": {
+    "file": "c:\\Users\\Anike\\CareRouter-AI\\CareRouter-AI\\backend\\tests\\fixtures\\audio\\hi_stat_emergency.wav",
+    "filename": "hi_stat_emergency.wav",
+    "lang": "hi",
+    "reference": "मरीज के सीने में बहुत तेज दर्द हो रहा है और सांस लेने में तकलीफ है।",
+    "category": "emergency"
+  },
+  "hi_medication_dosage": {
+    "file": "c:\\Users\\Anike\\CareRouter-AI\\CareRouter-AI\\backend\\tests\\fixtures\\audio\\hi_medication_dosage.wav",
+    "filename": "hi_medication_dosage.wav",
+    "lang": "hi",
+    "reference": "डॉक्टर साहब ने 500 मिलीग्राम पैरासिटामोल और इंसुलिन दो बार लेने को कहा है।",
+    "category": "medication"
+  },
+  "hi_code_switching": {
+    "file": "c:\\Users\\Anike\\CareRouter-AI\\CareRouter-AI\\backend\\tests\\fixtures\\audio\\hi_code_switching.wav",
+    "filename": "hi_code_switching.wav",
+    "lang": "hi",
+    "reference": "मेरा नाम सुरेश है, पेशेंट को severe chest pain और breathing problem हो रही है कमरा 108 में।",
+    "category": "code_switching"
+  }
+}

@@ -28,11 +28,30 @@ LANGUAGE_DISPLAY_NAMES = {
     "uncertain": "Language uncertain"
 }
 
-# Domain clinical initial prompts conditioned in native scripts to guide Whisper's decoder
+# Domain clinical initial prompts conditioned in native scripts to guide Whisper's decoder.
+# Biases the acoustic-language model toward Indian accents, medical terminology, dosages, and mixed speech.
 LANGUAGE_PROMPTS = {
-    "kn": "ಕನ್ನಡ ವೈದ್ಯಕೀಯ ಸಂಭಾಷಣೆ: ರೋಗಿಗೆ ಎದೆ ನೋವು, ಎದೆಯಲ್ಲಿ ನೋವು, ಉಸಿರಾಟದ ತೊಂದರೆ, ಆಸ್ಪತ್ರೆ, ವೈದ್ಯರು, ಚಿಕಿತ್ಸೆ, ಮಾತ್ರೆ, ಔಷಧ, ಕೊಠಡಿ, ನನಗೆ ಎದೆ ನೋವು ಇದೆ.",
-    "hi": "हिन्दी चिकित्सा परामर्श: मरीज, डॉक्टर, अस्पताल, सीने में दर्द, सांस लेने में तकलीफ, बुखार, दवा, कमरा, मेरा नाम, दर्द हो रहा है.",
-    "en": "Clinical hospital emergency triage call: patient, room, chest pain, shortness of breath, vitals, IV medication, swelling.",
+    "kn": (
+        "ಕನ್ನಡ ವೈದ್ಯಕೀಯ ಸಂಭಾಷಣೆ: ರೋಗಿಗೆ ಎದೆ ನೋವು, ಎದೆಯಲ್ಲಿ ನೋವು, ಉಸಿರಾಟದ ತೊಂದರೆ, ಜ್ವರ, ತಲೆತಿರುಗುವಿಕೆ, "
+        "ಊತ, ರಕ್ತಸ್ರಾವ, ಬಿಪಿ, ಶುಗರ್, ಆಸ್ಪತ್ರೆ, ವೈದ್ಯರು, ಡಾಕ್ಟರ್, ಶುಶ್ರೂಷಕಿ, ನರ್ಸ್, ಚಿಕಿತ್ಸೆ, ಮಾತ್ರೆ, ಔಷಧ, "
+        "ಇಂಜೆಕ್ಷನ್, ಐವಿ ಡ್ರಿಪ್, ಕೊಠಡಿ, ರೂಮ್, ವಾರ್ಡ್, 500 ಮಿಲಿಗ್ರಾಂ, ಪ್ಯಾರಸಿಟಮಾಲ್, ಮೆಟ್‌ಫಾರ್ಮಿನ್, "
+        "ಅಪಾಯಿಂಟ್‌ಮೆಂಟ್, ಡಿಸ್ಚಾರ್ಜ್, severe chest pain, shortness of breath, left arm swelling, IV machine."
+    ),
+    "hi": (
+        "हिन्दी चिकित्सा परामर्श एवं आपातकालीन कॉल: मरीज, डॉक्टर, नर्स, अस्पताल, सीने में दर्द, सांस लेने में तकलीफ, "
+        "बुखार, चक्कर, सूजन, खून बहना, बीपी, ब्लड प्रेशर, शुगर, डायबिटीज, दवा, गोली, टैबलेट, इंजेक्शन, "
+        "आईवी ड्रिप, 500 मिलीग्राम, पैरासिटामोल, मेटफॉर्मिन, इंसुलिन, कमरा, रूम, वार्ड, अपॉइंटमेंट, "
+        "डिस्चार्ज, severe chest pain, shortness of breath, left arm swelling, IV machine."
+    ),
+    "en": (
+        "Clinical hospital emergency triage call: patient Arthur, room, ward, bed 12, acute chest pain, "
+        "shortness of breath, oxygen saturation, tachycardia, IV infiltration, left arm swelling, "
+        "500 mg Paracetamol, 50 mg Metformin, insulin, prescription refill, appointment scheduling, "
+        "Dr. Rao, Dr. Sharma, Dr. Chen, discharge paperwork, billing inquiry."
+    ),
+    "neutral": (
+        "Clinical triage hospital call: patient, doctor, nurse, vitals, medicine, room, ward, emergency."
+    )
 }
 
 # Add NVIDIA cuBLAS / cuDNN DLL directories to DLL search path on Windows
@@ -40,7 +59,10 @@ def _setup_nvidia_dll_paths():
     """Ensure Windows can locate cublas64_12.dll and cudnn64_9.dll installed via pip wheels."""
     if sys.platform == "win32":
         prefix_path = Path(sys.prefix)
-        for bin_dir in prefix_path.glob("Lib/site-packages/nvidia/*/bin"):
+        # Check standard python site-packages locations for nvidia wheels
+        search_dirs = list(prefix_path.glob("Lib/site-packages/nvidia/*/bin"))
+        search_dirs.extend(prefix_path.glob("Lib/site-packages/nvidia/*/lib"))
+        for bin_dir in search_dirs:
             if bin_dir.is_dir():
                 try:
                     os.add_dll_directory(str(bin_dir.resolve()))
@@ -70,71 +92,101 @@ def normalize_kannada_clinical_orthography(text: str) -> str:
     """
     Normalizes common acoustic/phonetic variations in Kannada STT transcripts:
     E.g., spoken 'ಎದೆ ನೋವು' (ede novu = chest pain) is sometimes transcribed phonetically
-    as 'ಯದೆ ನೋವು' or 'ಯಾದೆ ನೋವು' due to the initial palatal glide.
+    as 'ಯದೆ ನೋವು' or 'ಯಾದೆ ನೋವು' or 'ಏದೇ ನೋವ' due to palatal glide and vowel length.
     """
     if not text:
         return text
     normalized = text
-    # Standardize phonetic glide variations for chest pain in Kannada
-    normalized = re.sub(r'\b(?:ಯದೆ|ಯಾದೆ)\s+ನೋವು\b', 'ಎದೆ ನೋವು', normalized)
-    normalized = re.sub(r'\b(?:ಯದೆ|ಯಾದೆ)\s+ನೋವ\b', 'ಎದೆ ನೋವು', normalized)
-    normalized = re.sub(r'\b(?:ಯದೆ|ಯಾದೆ)ನೋವು\b', 'ಎದೆನೋವು', normalized)
+    # Standardize phonetic variations for chest pain in Kannada
+    normalized = re.sub(r'\b(?:ಯದೆ|ಯಾದೆ|ಏದೇ|ಇದ್ಯು|ಯಾಧೆ)\s*(?:ನೋವು|ನೋವ|ನುವೀ)\b', 'ಎದೆ ನೋವು', normalized)
+    normalized = re.sub(r'\b(?:ಯದೆ|ಯಾದೆ|ಏದೇ|ಇದ್ಯು|ಯಾಧೆ)(?:ನೋವು|ನೋವ|ನುವೀ)\b', 'ಎದೆನೋವು', normalized)
+    normalized = re.sub(r'\bಉಸಿರಾಟದ\s*(?:ತೊಂಧರೆ|ತೊಂತರ|ತುನ್ದರೇ|ತಸ್ಣ್ದ್ಪ್ಂದಿ)\b', 'ಉಸಿರಾಟದ ತೊಂದರೆ', normalized)
+    normalized = re.sub(r'\bಪ್ಯಾರಸಿಟಮಲ್\b', 'ಪ್ಯಾರಸಿಟಮಾಲ್', normalized)
+    normalized = re.sub(r'\bಮೆಟ್ಫಾರ್ಮಿನ್\b', 'ಮೆಟ್‌ಫಾರ್ಮಿನ್', normalized)
+    normalized = re.sub(r'\b(?:ವೈಧ್ಡ್ಕೊರ|ವೈ ದೇರ|ವಾಈಧಿರನ್ನು)\b', 'ವೈದ್ಯರನ್ನು', normalized)
     return normalized
 
-# Global WhisperModel singleton
-_whisper_model = None
+def normalize_hindi_clinical_orthography(text: str) -> str:
+    """Normalizes common phonetic/spacing variations in Hindi clinical speech."""
+    if not text:
+        return text
+    normalized = text
+    normalized = re.sub(r'\bचेस्टपेन\b', 'चेस्ट पेन', normalized)
+    normalized = re.sub(r'\bहार्टअटैक\b', 'हार्ट अटैक', normalized)
+    normalized = re.sub(r'\b(?:सिनेमें|सीनेमे|सिने में)\b', 'सीने में', normalized)
+    normalized = re.sub(r'\bदर्ध\b', 'दर्द', normalized)
+    normalized = re.sub(r'\bतेस्द\b', 'तेज', normalized)
+    normalized = re.sub(r'\bमेंतकलीफ\b', 'में तकलीफ', normalized)
+    normalized = re.sub(r'\bपैरासिटामॉल\b', 'पैरासिटामोल', normalized)
+    normalized = re.sub(r'\bपेरासिटामोल\b', 'पैरासिटामोल', normalized)
+    normalized = re.sub(r'\bपैशिन्ट\b', 'पेशेंट', normalized)
+    return normalized
+
+# Model cache dictionary to reuse loaded models across inferences and avoid repeated downloads
+_whisper_models: Dict[str, Any] = {}
 _model_device = "cpu"
 _model_compute_type = "int8"
+_active_model_size = "medium"
 
-def get_whisper_model():
+def get_whisper_model(model_size: Optional[str] = None):
     """
-    Lazily loads the faster-whisper model singleton.
-    Uses 'medium' model by default for high Kannada, Hindi, and English accuracy.
-    Automatically leverages NVIDIA GPU with CUDA (float16) when available,
-    with robust fallback to CPU (int8) with multi-threading.
+    Lazily loads and caches the faster-whisper model singleton.
+    Reuses already loaded models to avoid repeated downloads or sequential blocking.
+    Leverages NVIDIA GPU with CUDA (float16) when available,
+    with robust automatic fallback to CPU (int8) with multi-threading.
     """
-    global _whisper_model, _model_device, _model_compute_type
-    if _whisper_model is None:
-        import ctranslate2
-        from faster_whisper import WhisperModel
+    global _whisper_models, _model_device, _model_compute_type, _active_model_size
 
-        model_size = os.getenv("WHISPER_MODEL_SIZE", "medium")
-        cuda_available = False
+    target_size = model_size or os.getenv("WHISPER_MODEL_SIZE", "medium")
+    _active_model_size = target_size
+
+    # Check if model is already cached
+    cache_key = f"{target_size}_{_model_device}"
+    if cache_key in _whisper_models:
+        return _whisper_models[cache_key]
+
+    import ctranslate2
+    from faster_whisper import WhisperModel
+
+    cuda_available = False
+    try:
+        cuda_count = ctranslate2.get_cuda_device_count()
+        cuda_available = (cuda_count > 0)
+    except Exception as e:
+        logger.warning(f"CUDA check error: {e}")
+
+    # Attempt CUDA loading if GPU is available
+    if cuda_available and os.getenv("FORCE_CPU", "0") != "1":
         try:
-            cuda_count = ctranslate2.get_cuda_device_count()
-            cuda_available = (cuda_count > 0)
-        except Exception as e:
-            logger.warning(f"CUDA check error: {e}")
+            logger.info(f"Attempting to load faster-whisper '{target_size}' on GPU (CUDA float16)...")
+            gpu_model = WhisperModel(target_size, device="cuda", compute_type="float16")
+            _model_device = "cuda"
+            _model_compute_type = "float16"
+            _whisper_models[f"{target_size}_cuda"] = gpu_model
+            logger.info(f"faster-whisper '{target_size}' successfully loaded on GPU (CUDA float16).")
+            return gpu_model
+        except Exception as cuda_err:
+            logger.warning(f"Failed to load model on CUDA ({cuda_err}). Falling back to CPU...")
 
-        if cuda_available:
-            try:
-                logger.info(f"Attempting to load faster-whisper '{model_size}' on GPU (CUDA float16)...")
-                _whisper_model = WhisperModel(model_size, device="cuda", compute_type="float16")
-                _model_device = "cuda"
-                _model_compute_type = "float16"
-                logger.info(f"faster-whisper '{model_size}' successfully loaded on GPU (CUDA float16).")
-                return _whisper_model
-            except Exception as cuda_err:
-                logger.warning(f"Failed to load model on CUDA ({cuda_err}). Falling back to CPU...")
-
-        # Fallback to CPU with multi-threading
-        cpu_threads = min(os.cpu_count() or 4, 8)
-        logger.info(f"Loading faster-whisper '{model_size}' on CPU (int8, threads={cpu_threads})...")
-        _whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
-        _model_device = "cpu"
-        _model_compute_type = "int8"
-        logger.info(f"faster-whisper '{model_size}' loaded successfully on CPU.")
-
-    return _whisper_model
+    # CPU Fallback with multi-threading
+    cpu_threads = min(os.cpu_count() or 4, 8)
+    logger.info(f"Loading faster-whisper '{target_size}' on CPU (int8, threads={cpu_threads})...")
+    cpu_model = WhisperModel(target_size, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
+    _model_device = "cpu"
+    _model_compute_type = "int8"
+    _whisper_models[f"{target_size}_cpu"] = cpu_model
+    logger.info(f"faster-whisper '{target_size}' loaded successfully on CPU.")
+    return cpu_model
 
 def get_engine_status() -> Dict[str, Any]:
     """Returns the current model, device, and acceleration status."""
     return {
         "engine": "faster-whisper",
-        "model_size": os.getenv("WHISPER_MODEL_SIZE", "medium"),
+        "model_size": _active_model_size,
         "device": _model_device,
         "compute_type": _model_compute_type,
-        "is_loaded": (_whisper_model is not None)
+        "is_loaded": (len(_whisper_models) > 0),
+        "cached_models": list(_whisper_models.keys())
     }
 
 def validate_audio_file(filename: str, file_size: int, content_type: Optional[str] = None):
@@ -168,9 +220,52 @@ def detect_script(text: str) -> str:
         return "en"
     return "unknown"
 
+def normalize_audio_channel_and_rate(file_path: Path) -> Tuple[Path, bool]:
+    """
+    Inspects audio channels and sample rate using PyAV.
+    If the file is already 16kHz mono WAV, returns (file_path, False).
+    Otherwise, resamples to mono 16kHz WAV to guarantee optimal faster-whisper accuracy
+    and avoid channel-layout or sampling-rate decoding errors.
+    """
+    try:
+        import av
+        with av.open(str(file_path), mode="r", metadata_errors="ignore") as container:
+            if not container.streams.audio:
+                return file_path, False
+            audio_stream = container.streams.audio[0]
+
+            # If already mono 16kHz wav, use directly
+            if (file_path.suffix.lower() == ".wav" and
+                audio_stream.channels == 1 and
+                audio_stream.sample_rate == 16000):
+                return file_path, False
+
+            # Resample to 16kHz mono WAV
+            norm_path = UPLOAD_DIR / f"norm_{file_path.stem}.wav"
+            resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
+
+            with av.open(str(norm_path), mode="w", format="wav") as out_container:
+                out_stream = out_container.add_stream("pcm_s16le", rate=16000)
+                out_stream.channels = 1
+                out_stream.layout = "mono"
+
+                for frame in container.decode(audio_stream):
+                    for r_frame in resampler.resample(frame):
+                        for packet in out_stream.encode(r_frame):
+                            out_container.mux(packet)
+                # Flush encoder
+                for packet in out_stream.encode():
+                    out_container.mux(packet)
+
+            return norm_path, True
+    except Exception as e:
+        logger.info(f"Direct stream pass-through (resampler skipped: {e})")
+        return file_path, False
+
 def transcribe_audio_file(
     file_path: Path,
-    language_preference: Optional[str] = None
+    language_preference: Optional[str] = None,
+    model_size: Optional[str] = None
 ) -> Dict[str, Any]:
     """
     Transcribes audio using faster-whisper with state-of-the-art Kannada, Hindi, and English support.
@@ -179,7 +274,7 @@ def transcribe_audio_file(
     Includes silence detection and robust VAD fallback.
     Returns transcript text, detected language, confidence score, duration, and silence status.
     """
-    model = get_whisper_model()
+    model = get_whisper_model(model_size=model_size)
 
     # Normalize language preference
     lang_code = None
@@ -215,26 +310,60 @@ def transcribe_audio_file(
     if is_silent:
         logger.info(f"Audio file '{file_path.name}' appears completely silent (max amplitude: {max_amplitude:.5f}).")
 
-    try:
-        # Step B: Select initial prompt based on language
-        initial_prompt = LANGUAGE_PROMPTS.get(lang_code) if lang_code else None
+    # Step B: Select initial prompt based on language
+    # For auto-detection, use neutral prompt to prevent biasing language identification toward any specific Indic script
+    if lang_code:
+        initial_prompt = LANGUAGE_PROMPTS.get(lang_code)
+    else:
+        initial_prompt = LANGUAGE_PROMPTS.get("neutral")
 
+    # Resample/normalize channels if necessary
+    target_path, is_temp = normalize_audio_channel_and_rate(file_path)
+
+    try:
         # Transcribe with faster-whisper:
         # - beam_size=5 for maximum accuracy
         # - condition_on_previous_text=False prevents repetitive loop hallucinations
-        # - vad_filter with safe padding prevents clipping quiet word endings
+        # - repetition_penalty=1.15 and no_repeat_ngram_size=3 prevent character loop hallucinations in Indic scripts
+        # - vad_filter with safe padding (speech_pad_ms=500) prevents clipping quiet word endings
         # - task='transcribe' guarantees native transcription without English translation
-        segments, info = model.transcribe(
-            str(file_path),
-            language=lang_code,
-            initial_prompt=initial_prompt,
-            beam_size=5,
-            temperature=0.0,
-            condition_on_previous_text=False,
-            vad_filter=True,
-            vad_parameters=dict(min_silence_duration_ms=500, speech_pad_ms=400),
-            task="transcribe"
-        )
+        try:
+            segments, info = model.transcribe(
+                str(target_path),
+                language=lang_code,
+                initial_prompt=initial_prompt,
+                beam_size=5,
+                temperature=0.0,
+                condition_on_previous_text=False,
+                repetition_penalty=1.15,
+                no_repeat_ngram_size=3,
+                vad_filter=True,
+                vad_parameters=dict(min_silence_duration_ms=400, speech_pad_ms=500),
+                task="transcribe"
+            )
+        except Exception as cuda_exec_err:
+            # Automatic fallback to CPU if CUDA runtime error occurs during transcribe()
+            if _model_device == "cuda":
+                logger.warning(f"CUDA transcription failed ({cuda_exec_err}). Falling back to CPU model...")
+                cpu_threads = min(os.cpu_count() or 4, 8)
+                from faster_whisper import WhisperModel
+                fallback_cpu_model = WhisperModel(_active_model_size, device="cpu", compute_type="int8", cpu_threads=cpu_threads)
+                _whisper_models[f"{_active_model_size}_cpu"] = fallback_cpu_model
+                segments, info = fallback_cpu_model.transcribe(
+                    str(target_path),
+                    language=lang_code,
+                    initial_prompt=initial_prompt,
+                    beam_size=5,
+                    temperature=0.0,
+                    condition_on_previous_text=False,
+                    repetition_penalty=1.15,
+                    no_repeat_ngram_size=3,
+                    vad_filter=True,
+                    vad_parameters=dict(min_silence_duration_ms=400, speech_pad_ms=500),
+                    task="transcribe"
+                )
+            else:
+                raise cuda_exec_err
 
         segment_list = []
         full_text_parts = []
@@ -260,12 +389,14 @@ def transcribe_audio_file(
         if not full_transcript and not is_silent and hasattr(info, "duration") and info.duration > 0.5:
             logger.info("First pass with VAD returned empty; running fallback without VAD...")
             segments_fallback, info = model.transcribe(
-                str(file_path),
+                str(target_path),
                 language=lang_code,
                 initial_prompt=initial_prompt,
                 beam_size=5,
                 temperature=0.0,
                 condition_on_previous_text=False,
+                repetition_penalty=1.15,
+                no_repeat_ngram_size=3,
                 vad_filter=False,
                 task="transcribe"
             )
@@ -349,6 +480,12 @@ def transcribe_audio_file(
             for seg in segment_list:
                 seg["text"] = normalize_kannada_clinical_orthography(seg["text"])
 
+        elif final_lang == "hi" or lang_code == "hi":
+            # Normalize Hindi orthography and spacing
+            full_transcript = normalize_hindi_clinical_orthography(full_transcript)
+            for seg in segment_list:
+                seg["text"] = normalize_hindi_clinical_orthography(seg["text"])
+
         avg_confidence = round(sum(confidences) / len(confidences), 3) if confidences else (
             lang_confidence if not is_uncertain else 0.40
         )
@@ -372,3 +509,7 @@ def transcribe_audio_file(
     except Exception as e:
         logger.error(f"Error during audio transcription: {e}")
         raise RuntimeError(f"Transcription failed: {str(e)}")
+    finally:
+        # Clean up temporary normalized file if created
+        if is_temp and target_path.exists():
+            target_path.unlink(missing_ok=True)

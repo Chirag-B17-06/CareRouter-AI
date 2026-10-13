@@ -58,3 +58,11 @@ htmlcov/
 *.swo
 .DS_Store
 Thumbs.db
+
+*.db-shm
+*.db-wal
+
+*.db-shm
+*.db-wal
+
+*.db

@@ -14,7 +14,11 @@ import {
   Inbox,
   Languages,
   Mic,
-  RotateCcw
+  RotateCcw,
+  CheckCheck,
+  Flame,
+  Timer,
+  ShieldAlert
 } from 'lucide-react';
 import { Ticket, TicketStatus, UrgencyTier } from '../types';
 import { TicketCard } from './TicketCard';
@@ -25,6 +29,7 @@ interface TicketBoardProps {
   onUpdateStatus: (ticketId: number, status: TicketStatus) => void;
   onDeleteTicket?: (ticketId: number) => void;
   onNavigateToRecord?: () => void;
+  onAcknowledge?: (ticketId: number) => void;
 }
 
 const DEPARTMENTS = [
@@ -32,9 +37,15 @@ const DEPARTMENTS = [
   'Rapid Response & Critical Nursing',
   'Nursing & Clinical Care',
   'Pharmacy & Therapeutics',
-  'Dietary & Clinical Nutrition',
+  'Outpatient & Appointment Coordination',
+  'Specialist Clinic & OPD Services',
+  'Patient Billing & Accounts',
+  'Health Insurance & Pre-Authorisation',
+  'Administration & Discharge Coordination',
   'Facilities & Environmental Services',
-  'Administration & Discharge Coordination'
+  'Dietary & Clinical Nutrition',
+  'Hospital Information & Patient Helpdesk',
+  'Clinical Follow-up & Care Coordination'
 ];
 
 export const TicketBoard: React.FC<TicketBoardProps> = ({
@@ -42,7 +53,8 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
   onSelectTicket,
   onUpdateStatus,
   onDeleteTicket,
-  onNavigateToRecord
+  onNavigateToRecord,
+  onAcknowledge
 }) => {
   const [selectedDept, setSelectedDept] = useState<string>('All');
   const [selectedUrgency, setSelectedUrgency] = useState<string>('All');
@@ -50,6 +62,7 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
   const [selectedLanguage, setSelectedLanguage] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [viewMode, setViewMode] = useState<'grid' | 'kanban'>('grid');
+  const [quickLifecycleFilter, setQuickLifecycleFilter] = useState<'all' | 'overdue' | 'unack' | 'escalated' | 'review'>('all');
 
   // Filter tickets
   const filteredTickets = tickets.filter((t) => {
@@ -67,6 +80,18 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
       if (selectedLanguage === 'kn' && t.language !== 'kn') return false;
       if (selectedLanguage === 'hi' && t.language !== 'hi') return false;
     }
+    if (quickLifecycleFilter === 'overdue' && !t.is_overdue) {
+      return false;
+    }
+    if (quickLifecycleFilter === 'unack' && (t.is_acknowledged || t.status === 'RESOLVED')) {
+      return false;
+    }
+    if (quickLifecycleFilter === 'escalated' && (!t.escalation_level || t.escalation_level <= 0)) {
+      return false;
+    }
+    if (quickLifecycleFilter === 'review' && (!t.requires_human_review || t.is_reviewed)) {
+      return false;
+    }
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       const match =
@@ -75,6 +100,11 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
         t.room_number.toLowerCase().includes(q) ||
         t.description.toLowerCase().includes(q) ||
         t.assigned_to.toLowerCase().includes(q) ||
+        (t.assigned_staff && t.assigned_staff.toLowerCase().includes(q)) ||
+        (t.assigned_team && t.assigned_team.toLowerCase().includes(q)) ||
+        (t.category && t.category.toLowerCase().includes(q)) ||
+        (t.required_action && t.required_action.toLowerCase().includes(q)) ||
+        (t.explicit_deadline && t.explicit_deadline.toLowerCase().includes(q)) ||
         (t.raw_quote && t.raw_quote.toLowerCase().includes(q));
       if (!match) return false;
     }
@@ -86,8 +116,14 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
     setSelectedUrgency('All');
     setSelectedStatus('All');
     setSelectedLanguage('All');
+    setQuickLifecycleFilter('all');
     setSearchQuery('');
   };
+
+  const overdueCount = tickets.filter((t) => t.is_overdue).length;
+  const unackCount = tickets.filter((t) => !t.is_acknowledged && t.status !== 'RESOLVED').length;
+  const escalatedCount = tickets.filter((t) => t.escalation_level && t.escalation_level > 0).length;
+  const reviewCount = tickets.filter((t) => t.requires_human_review && !t.is_reviewed).length;
 
   // Calculate department counters
   const getDeptCount = (deptName: string) => {
@@ -100,8 +136,14 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
     if (deptName.includes('Rapid Response')) return 'Rapid Response';
     if (deptName.includes('Nursing')) return 'Nursing';
     if (deptName.includes('Pharmacy')) return 'Pharmacy';
+    if (deptName.includes('Appointment') || deptName.includes('Outpatient')) return 'Appointments';
+    if (deptName.includes('Specialist')) return 'Specialist OPD';
+    if (deptName.includes('Billing')) return 'Billing';
+    if (deptName.includes('Insurance')) return 'Insurance';
     if (deptName.includes('Dietary')) return 'Dietary';
     if (deptName.includes('Facilities')) return 'Facilities';
+    if (deptName.includes('Helpdesk') || deptName.includes('Information')) return 'Helpdesk';
+    if (deptName.includes('Follow-up') || deptName.includes('Liaison')) return 'Callbacks';
     return 'Admin & Discharge';
   };
 
@@ -207,6 +249,84 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
           </div>
         </div>
 
+        {/* Quick Operational Lifecycle Filters */}
+        <div className="flex items-center gap-2 pt-2 border-t border-slate-800/60 overflow-x-auto no-scrollbar text-xs">
+          <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider shrink-0 mr-1">
+            Lifecycle:
+          </span>
+          <button
+            onClick={() => setQuickLifecycleFilter('all')}
+            className={`px-2.5 py-1 rounded-lg font-semibold transition-all flex items-center gap-1.5 shrink-0 ${
+              quickLifecycleFilter === 'all'
+                ? 'bg-slate-700 text-white'
+                : 'bg-slate-950/60 text-slate-400 hover:text-white border border-slate-800'
+            }`}
+          >
+            <span>All Tasks</span>
+            <span className="text-[10px] opacity-75 font-mono">({tickets.length})</span>
+          </button>
+
+          <button
+            onClick={() => setQuickLifecycleFilter('overdue')}
+            className={`px-2.5 py-1 rounded-lg font-semibold transition-all flex items-center gap-1.5 shrink-0 ${
+              quickLifecycleFilter === 'overdue'
+                ? 'bg-red-600 text-white shadow-md shadow-red-600/30'
+                : 'bg-slate-950/60 text-red-400 hover:bg-red-500/10 border border-red-500/30'
+            }`}
+          >
+            <Timer className="w-3.5 h-3.5" />
+            <span>Overdue SLA</span>
+            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-red-950/80 border border-red-500/40 font-bold">
+              {overdueCount}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setQuickLifecycleFilter('unack')}
+            className={`px-2.5 py-1 rounded-lg font-semibold transition-all flex items-center gap-1.5 shrink-0 ${
+              quickLifecycleFilter === 'unack'
+                ? 'bg-amber-600 text-white shadow-md shadow-amber-600/30'
+                : 'bg-slate-950/60 text-amber-400 hover:bg-amber-500/10 border border-amber-500/30'
+            }`}
+          >
+            <CheckCheck className="w-3.5 h-3.5" />
+            <span>Unacknowledged</span>
+            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-amber-950/80 border border-amber-500/40 font-bold">
+              {unackCount}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setQuickLifecycleFilter('escalated')}
+            className={`px-2.5 py-1 rounded-lg font-semibold transition-all flex items-center gap-1.5 shrink-0 ${
+              quickLifecycleFilter === 'escalated'
+                ? 'bg-purple-600 text-white shadow-md shadow-purple-600/30'
+                : 'bg-slate-950/60 text-purple-400 hover:bg-purple-500/10 border border-purple-500/30'
+            }`}
+          >
+            <Flame className="w-3.5 h-3.5" />
+            <span>Escalated (L1/L2)</span>
+            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-purple-950/80 border border-purple-500/40 font-bold">
+              {escalatedCount}
+            </span>
+          </button>
+
+          <button
+            onClick={() => setQuickLifecycleFilter('review')}
+            className={`px-2.5 py-1 rounded-lg font-semibold transition-all flex items-center gap-1.5 shrink-0 ${
+              quickLifecycleFilter === 'review'
+                ? 'bg-amber-600 text-white shadow-md shadow-amber-600/30'
+                : 'bg-slate-950/60 text-amber-400 hover:bg-amber-500/10 border border-amber-500/30'
+            }`}
+          >
+            <ShieldAlert className="w-3.5 h-3.5" />
+            <span>Review Queue</span>
+            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded-full bg-amber-950/80 border border-amber-500/40 font-bold">
+              {reviewCount}
+            </span>
+          </button>
+        </div>
+
         {/* Department Filter Tabs */}
         <div className="flex items-center gap-1.5 overflow-x-auto pb-1 pt-1 no-scrollbar">
           {DEPARTMENTS.map((dept) => {
@@ -294,6 +414,7 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
               onSelect={onSelectTicket}
               onUpdateStatus={onUpdateStatus}
               onDelete={onDeleteTicket}
+              onAcknowledge={onAcknowledge}
             />
           ))}
         </div>
@@ -336,6 +457,7 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
                         onSelect={onSelectTicket}
                         onUpdateStatus={onUpdateStatus}
                         onDelete={onDeleteTicket}
+                        onAcknowledge={onAcknowledge}
                       />
                     ))
                   )}

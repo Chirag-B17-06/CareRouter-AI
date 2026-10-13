@@ -4,15 +4,24 @@ import {
   fetchAnalytics,
   updateTicket,
   addTicketNote,
-  deleteTicket
+  deleteTicket,
+  acknowledgeTicket,
+  assignTicket,
+  escalateTicket,
+  resolveTicket,
+  checkEscalations,
+  reviewTicket,
+  fetchCalls
 } from './services/api';
-import { Ticket, AnalyticsData, ProcessCallResult, TicketStatus } from './types';
+import { Ticket, AnalyticsData, ProcessCallResult, TicketStatus, Call } from './types';
 import { Navbar } from './components/Navbar';
 import { EmergencyBanner } from './components/EmergencyBanner';
 import { TicketBoard } from './components/TicketBoard';
 import { AudioRecorder } from './components/AudioRecorder';
 import { TicketDetailModal } from './components/TicketDetailModal';
 import { AnalyticsModal } from './components/AnalyticsModal';
+import { ShiftHandoverModal } from './components/ShiftHandoverModal';
+import { CallsExplorer } from './components/CallsExplorer';
 import { soundManager } from './utils/audio';
 import {
   Activity,
@@ -22,14 +31,17 @@ import {
   Layers,
   Mic,
   ShieldCheck,
-  Sparkles
+  Sparkles,
+  Timer
 } from 'lucide-react';
 
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'board' | 'record' | 'analytics'>('board');
+  const [activeTab, setActiveTab] = useState<'board' | 'calls' | 'record' | 'analytics'>('board');
   const [tickets, setTickets] = useState<Ticket[]>([]);
+  const [calls, setCalls] = useState<Call[]>([]);
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [backendError, setBackendError] = useState<string | null>(null);
 
   // Audio alerts mute state
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -37,6 +49,7 @@ export const App: React.FC = () => {
   // Modals state
   const [selectedTicket, setSelectedTicket] = useState<Ticket | null>(null);
   const [isAnalyticsOpen, setIsAnalyticsOpen] = useState<boolean>(false);
+  const [isShiftHandoverOpen, setIsShiftHandoverOpen] = useState<boolean>(false);
 
   // Notification toast
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -46,17 +59,23 @@ export const App: React.FC = () => {
     setTimeout(() => setToastMessage(null), 4500);
   };
 
-  // Load all dashboard tickets & analytics from FastAPI backend
+  // Load all dashboard tickets, analytics & calls from FastAPI backend
   const loadDashboardData = useCallback(async () => {
     try {
-      const [ticketsData, analyticsData] = await Promise.all([
+      setBackendError(null);
+      // Proactively check overdue tasks for auto-escalation
+      await checkEscalations().catch(() => {});
+      const [ticketsData, analyticsData, callsData] = await Promise.all([
         fetchTickets(),
-        fetchAnalytics()
+        fetchAnalytics(),
+        fetchCalls().catch(() => [])
       ]);
       setTickets(ticketsData);
       setAnalytics(analyticsData);
+      setCalls(callsData);
     } catch (err) {
       console.warn("Backend connection issue:", err);
+      setBackendError((err as Error).message || "Failed to connect to FastAPI backend");
     } finally {
       setIsLoading(false);
     }
@@ -89,6 +108,89 @@ export const App: React.FC = () => {
       fetchAnalytics().then(setAnalytics).catch(() => {});
     } catch (err) {
       alert("Failed to advance status: " + (err as Error).message);
+    }
+  };
+
+  // Phase 5 Lifecycle Handlers
+  const handleAcknowledge = async (ticketId: number, staffName: string = 'Nurse on Duty') => {
+    try {
+      const updated = await acknowledgeTicket(ticketId, staffName);
+      setTickets((prev) => prev.map((t) => (t.id === ticketId ? updated : t)));
+      if (selectedTicket && selectedTicket.id === ticketId) {
+        setSelectedTicket(updated);
+      }
+      showToast(`Ticket #${ticketId} acknowledged by ${staffName}`);
+      soundManager.playSuccessChime();
+      fetchAnalytics().then(setAnalytics).catch(() => {});
+    } catch (err) {
+      alert("Failed to acknowledge ticket: " + (err as Error).message);
+    }
+  };
+
+  const handleAssign = async (ticketId: number, staff: string, team: string) => {
+    try {
+      const updated = await assignTicket(ticketId, {
+        assigned_staff: staff,
+        assigned_team: team
+      });
+      setTickets((prev) => prev.map((t) => (t.id === ticketId ? updated : t)));
+      if (selectedTicket && selectedTicket.id === ticketId) {
+        setSelectedTicket(updated);
+      }
+      showToast(`Ticket #${ticketId} assigned to ${staff || team}`);
+      soundManager.playSuccessChime();
+    } catch (err) {
+      alert("Failed to assign ticket: " + (err as Error).message);
+    }
+  };
+
+  const handleEscalate = async (ticketId: number, reason: string, staff: string) => {
+    try {
+      const updated = await escalateTicket(ticketId, reason, staff);
+      setTickets((prev) => prev.map((t) => (t.id === ticketId ? updated : t)));
+      if (selectedTicket && selectedTicket.id === ticketId) {
+        setSelectedTicket(updated);
+      }
+      showToast(`Ticket #${ticketId} escalated to Level ${updated.escalation_level}`);
+      soundManager.playEmergencyAlert();
+      fetchAnalytics().then(setAnalytics).catch(() => {});
+    } catch (err) {
+      alert("Failed to escalate ticket: " + (err as Error).message);
+    }
+  };
+
+  const handleResolve = async (ticketId: number, notes: string, staff: string) => {
+    try {
+      const updated = await resolveTicket(ticketId, notes, staff);
+      setTickets((prev) => prev.map((t) => (t.id === ticketId ? updated : t)));
+      if (selectedTicket && selectedTicket.id === ticketId) {
+        setSelectedTicket(updated);
+      }
+      showToast(`Ticket #${ticketId} resolved by ${staff}`);
+      soundManager.playSuccessChime();
+      fetchAnalytics().then(setAnalytics).catch(() => {});
+    } catch (err) {
+      alert("Failed to resolve ticket: " + (err as Error).message);
+    }
+  };
+
+  // Phase 6: Human Clinical Review & Audit Correction Handler
+  const handleReviewTicket = async (ticketId: number, reviewData: any) => {
+    try {
+      const updated = await reviewTicket(ticketId, reviewData);
+      setTickets((prev) => prev.map((t) => (t.id === ticketId ? updated : t)));
+      if (selectedTicket && selectedTicket.id === ticketId) {
+        setSelectedTicket(updated);
+      }
+      showToast(
+        (reviewData.action === 'APPROVE' || reviewData.decision === 'APPROVE')
+          ? `Ticket #${ticketId} clinically approved.`
+          : `Ticket #${ticketId} corrected & SLA recalculated.`
+      );
+      soundManager.playSuccessChime();
+      fetchAnalytics().then(setAnalytics).catch(() => {});
+    } catch (err) {
+      alert("Failed to review ticket: " + (err as Error).message);
     }
   };
 
@@ -130,6 +232,10 @@ export const App: React.FC = () => {
     (t) => t.urgency === 'STAT_EMERGENCY' && t.status !== 'RESOLVED'
   );
 
+  const overdueTickets = tickets.filter((t) => t.is_overdue);
+  const escalatedTickets = tickets.filter((t) => t.escalation_level && t.escalation_level > 0);
+  const unreviewedTickets = tickets.filter((t) => t.requires_human_review && !t.is_reviewed);
+
   return (
     <div className="min-h-screen flex flex-col bg-[#060b13] text-slate-100 font-sans selection:bg-sky-500 selection:text-white">
       
@@ -146,11 +252,33 @@ export const App: React.FC = () => {
         isMuted={isMuted}
         onToggleSound={toggleSound}
         emergencyCount={activeEmergencyTickets.length}
+        unreviewedCount={unreviewedTickets.length}
+        callsCount={calls.length}
+        onOpenShiftHandover={() => setIsShiftHandoverOpen(true)}
       />
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
         
+        {/* Backend Connection Error Banner */}
+        {backendError && (
+          <div className="p-4 rounded-xl bg-rose-950/70 border border-rose-500/50 text-rose-200 text-xs flex items-center justify-between gap-3 shadow-lg">
+            <div className="flex items-center gap-2">
+              <AlertOctagon className="w-4 h-4 text-rose-400 shrink-0" />
+              <span><strong>Backend Connectivity Warning:</strong> {backendError}. Ensure FastAPI is running on port 8000.</span>
+            </div>
+            <button
+              onClick={() => {
+                setIsLoading(true);
+                loadDashboardData();
+              }}
+              className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shrink-0 transition-colors"
+            >
+              Retry Connection
+            </button>
+          </div>
+        )}
+
         {/* Toast Alert Banner */}
         {toastMessage && (
           <div className="p-3 rounded-xl bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 text-xs font-semibold flex items-center justify-between shadow-lg shadow-emerald-950/40 animate-slide-up">
@@ -167,8 +295,24 @@ export const App: React.FC = () => {
           </div>
         )}
 
-        {/* View 1: Audio Recorder & Call Intake */}
-        {activeTab === 'record' ? (
+        {/* View 1: Call Transcripts & Structured Summaries Explorer */}
+        {activeTab === 'calls' ? (
+          <div className="space-y-4 animate-fade-in">
+            <div className="flex items-center justify-between pb-2">
+              <button
+                onClick={() => setActiveTab('board')}
+                className="text-xs text-sky-400 hover:text-sky-300 font-semibold flex items-center gap-1.5 transition-colors"
+              >
+                &larr; Back to Live Triage Board
+              </button>
+            </div>
+            <CallsExplorer
+              onSelectTicket={(ticket) => setSelectedTicket(ticket)}
+              onNavigateToRecord={() => setActiveTab('record')}
+            />
+          </div>
+        ) : activeTab === 'record' ? (
+          /* View 2: Audio Recorder & Call Intake */
           <div className="space-y-4 animate-fade-in">
             <div className="flex items-center justify-between pb-2">
               <button
@@ -194,7 +338,7 @@ export const App: React.FC = () => {
             />
 
             {/* Hospital Command Center Metrics Header */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 sm:gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-4">
               
               <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 shadow-lg flex items-center space-x-3.5">
                 <div className="p-2.5 rounded-xl bg-sky-500/10 border border-sky-500/20 text-sky-400 shrink-0">
@@ -229,6 +373,29 @@ export const App: React.FC = () => {
                     {activeEmergencyTickets.length}
                   </span>
                   <span className="text-[10px] text-slate-500 block">Critical under 5m</span>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 shadow-lg flex items-center space-x-3.5">
+                <div className={`p-2.5 rounded-xl border shrink-0 ${
+                  overdueTickets.length > 0
+                    ? 'bg-red-500/10 border-red-500/30 text-red-400'
+                    : 'bg-slate-800/60 border-slate-700 text-slate-400'
+                }`}>
+                  <Timer className="w-5 h-5" />
+                </div>
+                <div>
+                  <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider block">
+                    Overdue SLA
+                  </span>
+                  <span className={`text-xl sm:text-2xl font-extrabold ${
+                    overdueTickets.length > 0 ? 'text-red-400' : 'text-slate-300'
+                  }`}>
+                    {overdueTickets.length}
+                  </span>
+                  <span className="text-[10px] text-slate-500 block">
+                    {escalatedTickets.length > 0 ? `${escalatedTickets.length} escalated` : 'Target < 0'}
+                  </span>
                 </div>
               </div>
 
@@ -293,6 +460,7 @@ export const App: React.FC = () => {
               onUpdateStatus={handleUpdateStatus}
               onDeleteTicket={handleDeleteTicket}
               onNavigateToRecord={() => setActiveTab('record')}
+              onAcknowledge={(id) => handleAcknowledge(id, 'Nurse on Duty')}
             />
 
           </div>
@@ -324,6 +492,12 @@ export const App: React.FC = () => {
         onUpdateStatus={handleUpdateStatus}
         onAddNote={handleAddNote}
         onDelete={handleDeleteTicket}
+        onAcknowledge={handleAcknowledge}
+        onAssign={handleAssign}
+        onEscalate={handleEscalate}
+        onResolve={handleResolve}
+        onReview={handleReviewTicket}
+        onSelectSiblingTicket={(sib) => setSelectedTicket(sib)}
       />
 
       {/* Analytics Modal */}
@@ -331,6 +505,12 @@ export const App: React.FC = () => {
         isOpen={isAnalyticsOpen}
         onClose={() => setIsAnalyticsOpen(false)}
         analytics={analytics}
+      />
+
+      {/* Phase 6: Shift Handover & Hospital Reporting Modal */}
+      <ShiftHandoverModal
+        isOpen={isShiftHandoverOpen}
+        onClose={() => setIsShiftHandoverOpen(false)}
       />
 
     </div>

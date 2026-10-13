@@ -28,13 +28,13 @@ def override_get_db():
     finally:
         db.close()
 
-app.dependency_overrides[get_db] = override_get_db
-
 @pytest.fixture(autouse=True)
 def setup_database():
+    app.dependency_overrides[get_db] = override_get_db
     Base.metadata.create_all(bind=test_engine)
     yield
     Base.metadata.drop_all(bind=test_engine)
+    app.dependency_overrides.pop(get_db, None)
 
 client = TestClient(app)
 
@@ -369,3 +369,20 @@ def test_empty_transcript_submission_rejected():
     res2 = client.post("/api/calls/process-transcript", json={"raw_transcript": "    "})
     assert res2.status_code == 400
     assert "empty or blank transcript" in res2.json()["detail"].lower()
+
+def test_stream_audio_file_endpoint():
+    """Streaming nonexistent audio should 404; existing audio file should serve 200."""
+    res404 = client.get("/api/audio/nonexistent_audio_file.wav")
+    assert res404.status_code == 404
+
+    # Create a small dummy file in UPLOAD_DIR
+    from audio_transcriber import UPLOAD_DIR
+    test_file = UPLOAD_DIR / "test_sample.wav"
+    test_file.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00data\x00\x00\x00\x00")
+    try:
+        res200 = client.get("/api/audio/test_sample.wav")
+        assert res200.status_code == 200
+        assert "audio" in res200.headers.get("content-type", "")
+    finally:
+        if test_file.exists():
+            test_file.unlink(missing_ok=True)

@@ -7,15 +7,20 @@ import {
   BarChart3,
   Building2,
   Layers,
-  ShieldCheck
+  ShieldCheck,
+  ClipboardCheck,
+  Phone
 } from 'lucide-react';
 
 interface NavbarProps {
-  activeTab: 'board' | 'record' | 'analytics';
-  onSelectTab: (tab: 'board' | 'record' | 'analytics') => void;
+  activeTab: 'board' | 'calls' | 'record' | 'analytics';
+  onSelectTab: (tab: 'board' | 'calls' | 'record' | 'analytics') => void;
   isMuted: boolean;
   onToggleSound: () => void;
   emergencyCount: number;
+  unreviewedCount?: number;
+  callsCount?: number;
+  onOpenShiftHandover: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -23,7 +28,10 @@ export const Navbar: React.FC<NavbarProps> = ({
   onSelectTab,
   isMuted,
   onToggleSound,
-  emergencyCount
+  emergencyCount,
+  unreviewedCount,
+  callsCount,
+  onOpenShiftHandover
 }) => {
   return (
     <header className="sticky top-0 z-40 w-full border-b border-slate-800/80 bg-[#060b13]/90 backdrop-blur-md">
@@ -69,6 +77,24 @@ export const Navbar: React.FC<NavbarProps> = ({
           </button>
 
           <button
+            onClick={() => onSelectTab('calls')}
+            id="nav-tab-calls"
+            className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
+              activeTab === 'calls'
+                ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <Phone className="w-3.5 h-3.5 text-sky-400" />
+            <span>Call Transcripts</span>
+            {callsCount !== undefined && callsCount > 0 && (
+              <span className="px-1.5 py-0.2 rounded-full text-[9px] bg-slate-800 text-slate-300 font-mono">
+                {callsCount}
+              </span>
+            )}
+          </button>
+
+          <button
             onClick={() => onSelectTab('record')}
             id="nav-tab-record"
             className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all flex items-center gap-1.5 ${
@@ -92,6 +118,21 @@ export const Navbar: React.FC<NavbarProps> = ({
           >
             <BarChart3 className="w-3.5 h-3.5 text-teal-400" />
             <span>Analytics</span>
+          </button>
+
+          <button
+            onClick={onOpenShiftHandover}
+            id="nav-tab-handover"
+            className="px-3.5 py-1.5 rounded-lg text-xs font-semibold text-slate-400 hover:text-white hover:bg-slate-900 transition-all flex items-center gap-1.5"
+            title="Shift Handover Report & Data Export"
+          >
+            <ClipboardCheck className="w-3.5 h-3.5 text-purple-400" />
+            <span>Shift Handover</span>
+            {unreviewedCount && unreviewedCount > 0 ? (
+              <span className="px-1.5 py-0.2 rounded-full text-[9px] bg-amber-500/20 text-amber-300 border border-amber-500/40 font-mono font-bold animate-pulse">
+                {unreviewedCount}
+              </span>
+            ) : null}
           </button>
         </div>
 

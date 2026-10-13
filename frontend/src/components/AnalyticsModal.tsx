@@ -9,7 +9,8 @@ import {
   CheckCircle2,
   TrendingUp,
   ShieldCheck,
-  Languages
+  Languages,
+  ShieldAlert
 } from 'lucide-react';
 import { AnalyticsData } from '../types';
 
@@ -68,7 +69,7 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
         <div className="overflow-y-auto p-4 sm:p-6 space-y-6 flex-1">
           
           {/* Top KPI Grid */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
             
             <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
               <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
@@ -108,6 +109,17 @@ export const AnalyticsModal: React.FC<AnalyticsModalProps> = ({
                 {analytics.avg_triage_latency_ms} <span className="text-xs font-normal text-slate-400">ms</span>
               </div>
               <div className="text-[10px] text-purple-400/80 font-medium mt-1">Local zero-key engine</div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800">
+              <div className="flex items-center justify-between text-slate-400 text-xs mb-1">
+                <span>Needs Review</span>
+                <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
+              </div>
+              <div className="text-2xl font-extrabold text-amber-300">
+                {analytics.unreviewed_tickets ?? 0}
+              </div>
+              <div className="text-[10px] text-amber-400/80 font-medium mt-1">Audit review queue</div>
             </div>
 
           </div>
