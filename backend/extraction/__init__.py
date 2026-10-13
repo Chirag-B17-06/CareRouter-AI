@@ -1,0 +1,1 @@
+"""Transcript -> validated structured information."""

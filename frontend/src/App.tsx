@@ -11,10 +11,18 @@ import {
   resolveTicket,
   checkEscalations,
   reviewTicket,
-  fetchCalls
+  fetchCalls,
+  fetchMe,
+  logout
 } from './services/api';
-import { Ticket, AnalyticsData, ProcessCallResult, TicketStatus, Call } from './types';
-import { Navbar } from './components/Navbar';
+import { Ticket, AnalyticsData, ProcessCallResult, TicketStatus, Call, SessionUser } from './types';
+import { getStoredUser, getToken, saveSession, clearSession, hasPermission, SESSION_EXPIRED_EVENT } from './services/session';
+import { Navbar, TabId } from './components/Navbar';
+import { LoginScreen } from './components/LoginScreen';
+import { PatientPortal } from './components/PatientPortal';
+import { PatientsView } from './components/PatientsView';
+import { SchedulingView } from './components/SchedulingView';
+import { AdminView } from './components/AdminView';
 import { EmergencyBanner } from './components/EmergencyBanner';
 import { TicketBoard } from './components/TicketBoard';
 import { AudioRecorder } from './components/AudioRecorder';
@@ -35,8 +43,8 @@ import {
   Timer
 } from 'lucide-react';
 
-export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'board' | 'calls' | 'record' | 'analytics'>('board');
+const StaffApp: React.FC<{ user: SessionUser; onLogout: () => void }> = ({ user, onLogout }) => {
+  const [activeTab, setActiveTab] = useState<TabId>(hasPermission(user, 'task:read') ? 'board' : 'patients');
   const [tickets, setTickets] = useState<Ticket[]>([]);
   const [calls, setCalls] = useState<Call[]>([]);
   const [analytics, setAnalytics] = useState<AnalyticsData | null>(null);
@@ -64,10 +72,11 @@ export const App: React.FC = () => {
     try {
       setBackendError(null);
       // Proactively check overdue tasks for auto-escalation
-      await checkEscalations().catch(() => {});
+      if (hasPermission(user, 'task:write')) await checkEscalations().catch(() => {});
+      // Each role only has some of these permissions; a refused optional feed must not blank the board.
       const [ticketsData, analyticsData, callsData] = await Promise.all([
         fetchTickets(),
-        fetchAnalytics(),
+        fetchAnalytics().catch(() => null),
         fetchCalls().catch(() => [])
       ]);
       setTickets(ticketsData);
@@ -79,7 +88,7 @@ export const App: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [user]);
 
   useEffect(() => {
     loadDashboardData();
@@ -229,7 +238,7 @@ export const App: React.FC = () => {
 
   // Active STAT emergency tickets
   const activeEmergencyTickets = tickets.filter(
-    (t) => t.urgency === 'STAT_EMERGENCY' && t.status !== 'RESOLVED'
+    (t) => t.urgency === 'STAT_EMERGENCY' && t.status !== 'RESOLVED' && t.status !== 'CLOSED'
   );
 
   const overdueTickets = tickets.filter((t) => t.is_overdue);
@@ -241,6 +250,8 @@ export const App: React.FC = () => {
       
       {/* Top Navigation Bar */}
       <Navbar
+        user={user}
+        onLogout={onLogout}
         activeTab={activeTab}
         onSelectTab={(tab) => {
           if (tab === 'analytics') {
@@ -325,8 +336,22 @@ export const App: React.FC = () => {
             <AudioRecorder
               onSuccess={handleAudioSuccess}
               onNavigateToBoard={() => setActiveTab('board')}
+              canLinkPatient={hasPermission(user, 'patient:link')}
+              onOpenPatients={hasPermission(user, 'patient:read') ? () => setActiveTab('patients') : undefined}
             />
           </div>
+        ) : activeTab === 'patients' ? (
+          <PatientsView
+            user={user}
+            onOpenTask={(id) => {
+              const t = tickets.find((x) => x.id === id);
+              if (t) setSelectedTicket(t);
+            }}
+          />
+        ) : activeTab === 'scheduling' ? (
+          <SchedulingView user={user} />
+        ) : activeTab === 'admin' ? (
+          <AdminView user={user} />
         ) : (
           /* View 2: Hospital Command Center & Triage Board */
           <div className="space-y-6 animate-fade-in">
@@ -351,7 +376,7 @@ export const App: React.FC = () => {
                   <span className="text-xl sm:text-2xl font-extrabold text-white">
                     {tickets.length}
                   </span>
-                  <span className="text-[10px] text-slate-500 block">Across 6 departments</span>
+                  <span className="text-[10px] text-slate-500 block">Across {new Set(tickets.map((t) => t.assigned_team || t.department)).size} teams</span>
                 </div>
               </div>
 
@@ -425,13 +450,14 @@ export const App: React.FC = () => {
                   <span className="text-xl sm:text-2xl font-extrabold text-teal-300">
                     {analytics?.total_calls || 0}
                   </span>
-                  <span className="text-[10px] text-teal-400/80 block">Faster-Whisper STT</span>
+                  <span className="text-[10px] text-teal-400/80 block">Speech-to-text jobs</span>
                 </div>
               </div>
 
             </div>
 
             {/* Quick Action Banner */}
+            {(hasPermission(user, 'audio:transcribe') || hasPermission(user, 'conversation:write')) && (
             <div className="p-4 rounded-2xl bg-slate-900/40 border border-slate-800/90 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex items-center space-x-2">
                 <Sparkles className="w-4 h-4 text-sky-400 shrink-0" />
@@ -439,7 +465,7 @@ export const App: React.FC = () => {
                   Multilingual Clinical Voice Intake:
                 </span>
                 <span className="text-xs text-slate-400 hidden sm:inline">
-                  Record real voice or upload audio in Kannada (ಕನ್ನಡ), Hindi (हिन्दी), or English
+                  Record or upload audio, or type the conversation; review the transcript before it becomes tasks
                 </span>
               </div>
 
@@ -452,6 +478,7 @@ export const App: React.FC = () => {
                 <span>Record New Call</span>
               </button>
             </div>
+            )}
 
             {/* Live Triage Board */}
             <TicketBoard
@@ -478,9 +505,9 @@ export const App: React.FC = () => {
           </div>
           <div className="flex items-center space-x-3 text-[11px]">
             <span className="px-2 py-0.5 rounded bg-sky-950/60 border border-sky-800 text-sky-400">
-              Faster-Whisper &bull; Kannada &bull; Hindi &bull; English
+              Decision support only &mdash; not a substitute for clinical triage
             </span>
-            <span>FastAPI &bull; SQLite &bull; React TypeScript</span>
+            <span>Activity on patient records is logged</span>
           </div>
         </div>
       </footer>
@@ -515,6 +542,60 @@ export const App: React.FC = () => {
 
     </div>
   );
+};
+
+export const App: React.FC = () => {
+  const [user, setUser] = useState<SessionUser | null>(() => (getToken() ? getStoredUser() : null));
+  const [checking, setChecking] = useState<boolean>(() => !!getToken());
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // Confirm any remembered session with the server before showing data.
+  useEffect(() => {
+    if (!getToken()) {
+      setChecking(false);
+      return;
+    }
+    fetchMe()
+      .then((fresh) => {
+        saveSession(getToken() as string, fresh);
+        setUser(fresh);
+      })
+      .catch(() => {
+        clearSession();
+        setUser(null);
+      })
+      .finally(() => setChecking(false));
+  }, []);
+
+  useEffect(() => {
+    const onExpired = () => {
+      setUser(null);
+      setNotice('Your session ended. Please sign in again.');
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired);
+  }, []);
+
+  const handleLogout = async () => {
+    await logout();
+    setUser(null);
+    setNotice(null);
+  };
+
+  if (checking) {
+    return (
+      <div role="status" className="min-h-screen flex items-center justify-center bg-[#060b13] text-slate-400 text-sm">
+        Checking your session…
+      </div>
+    );
+  }
+  if (!user) {
+    return <LoginScreen notice={notice} onSignedIn={(u) => { setNotice(null); setUser(u); }} />;
+  }
+  if (user.role === 'patient') {
+    return <PatientPortal user={user} onLogout={handleLogout} />;
+  }
+  return <StaffApp key={user.id} user={user} onLogout={handleLogout} />;
 };
 
 export default App;

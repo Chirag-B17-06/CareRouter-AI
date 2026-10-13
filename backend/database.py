@@ -1,7 +1,7 @@
 import os
 import json
 from datetime import datetime, timezone
-from sqlalchemy import create_engine, Column, Integer, String, Text, Float, DateTime, ForeignKey, Boolean, event
+from sqlalchemy import create_engine, Column, Integer, String, Text, Float, DateTime, ForeignKey, Boolean, Index, event
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./care_router.db")
@@ -42,6 +42,18 @@ class Call(Base):
     audio_filename = Column(String(255), default="")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     status = Column(String(50), default="processed")
+    # --- patient coordination additions -------------------------------------------------
+    patient_id = Column(Integer, ForeignKey("patients.id"), nullable=True, index=True)
+    # none | needs_confirmation | confirmed  (name-only matches are never auto-linked)
+    patient_match_status = Column(String(30), default="none")
+    patient_match_candidates = Column(Text, default="[]")  # JSON: [{patient_id, score, signals}]
+    extraction_json = Column(Text, default="{}")           # validated StructuredExtraction (JSON)
+    extraction_provider = Column(String(40), default="")
+    source_channel = Column(String(20), default="manual")  # microphone|upload|manual
+    recording_consent = Column(Boolean, default=False)
+    original_asr_transcript = Column(Text, default="")     # untouched ASR output; raw_transcript holds the reviewed text
+    transcription_job_id = Column(String(32), nullable=True)
+    created_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     tickets = relationship("Ticket", back_populates="call", cascade="all, delete-orphan")
 
@@ -90,11 +102,20 @@ class Ticket(Base):
     room_number = Column(String(50), default="Unassigned")
     patient_name = Column(String(100), default="Unknown Patient")
     triage_notes = Column(Text, default="")
+    # --- patient coordination additions -------------------------------------------------
+    patient_id = Column(Integer, ForeignKey("patients.id"), nullable=True, index=True)
+    task_category = Column(String(40), default="general_patient_support", index=True)
+    routing_reason = Column(Text, default="")
+    routing_rule_id = Column(Integer, nullable=True)
+    dedupe_key = Column(String(64), nullable=True, index=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
     call = relationship("Call", back_populates="tickets")
     audit_logs = relationship("AuditLog", back_populates="ticket", cascade="all, delete-orphan", order_by="AuditLog.created_at.desc()")
+
+    # Duplicate-task guard enforced by the database (NULL dedupe_key rows - e.g. portal tasks - are exempt).
+    __table_args__ = (Index("uq_tickets_call_dedupe", "call_id", "dedupe_key", unique=True),)
 
     @property
     def flags_list(self):
@@ -112,7 +133,7 @@ class Ticket(Base):
 
     @property
     def is_overdue(self) -> bool:
-        if self.status == "RESOLVED" or not self.deadline_at:
+        if self.status in ("RESOLVED", "CLOSED") or not self.deadline_at:
             return False
         now_utc = datetime.now(timezone.utc)
         target_dl = self.deadline_at
@@ -137,6 +158,8 @@ class AuditLog(Base):
     ticket = relationship("Ticket", back_populates="audit_logs")
 
 def init_db():
+    import models_care  # noqa: F401  (register patient-coordination tables on Base.metadata)
+    # create_all adds missing tables only; new columns on existing tables come from migrations.py.
     Base.metadata.create_all(bind=engine)
     # Automatic backward-compatible column addition for SQLite
     if DATABASE_URL.startswith("sqlite"):
@@ -214,6 +237,8 @@ def init_db():
                 conn.close()
             except Exception as e:
                 pass
+    from migrations import run_migrations
+    run_migrations(engine)
 
 def get_db():
     db = SessionLocal()

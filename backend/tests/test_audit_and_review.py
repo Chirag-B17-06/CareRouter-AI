@@ -140,10 +140,9 @@ def test_audit_log_tracks_complete_lifecycle():
     assert "RESOLVED" in actions
 
     actors = [a["actor"] for a in final_ticket["audit_logs"]]
-    assert "Nurse Priya" in actors
-    assert "Charge Nurse Deepa" in actors
-    assert "Nurse John" in actors
-    assert "Senior Nurse Meera" in actors
+    # Actor identity now comes from the authenticated session, not from client-supplied names.
+    assert "Test Administrator" in actors
+    assert "AI Dispatch Engine" in actors
 
 def test_human_review_mode_approval():
     db = TestingSessionLocal()
@@ -178,14 +177,14 @@ def test_human_review_mode_approval():
 
     assert data["is_reviewed"] is True
     assert data["requires_human_review"] is False
-    assert data["reviewed_by"] == "Dr. Sandeep Rao"
+    assert data["reviewed_by"] == "Test Administrator"
     assert "telemetry" in data["review_notes"]
 
     # Verify audit log
     actions = [a["action"] for a in data["audit_logs"]]
     assert "HUMAN_REVIEW_APPROVED" in actions
     approve_audit = next(a for a in data["audit_logs"] if a["action"] == "HUMAN_REVIEW_APPROVED")
-    assert approve_audit["actor"] == "Dr. Sandeep Rao"
+    assert approve_audit["actor"] == "Test Administrator"
 
 def test_human_review_mode_correction_recalculates_sla():
     db = TestingSessionLocal()
@@ -236,7 +235,7 @@ def test_human_review_mode_correction_recalculates_sla():
     actions = [a["action"] for a in data["audit_logs"]]
     assert "HUMAN_REVIEW_CORRECTED" in actions
     corr_audit = next(a for a in data["audit_logs"] if a["action"] == "HUMAN_REVIEW_CORRECTED")
-    assert corr_audit["actor"] == "Dr. Kavita Joshi (Cardiologist)"
+    assert corr_audit["actor"] == "Test Administrator"
 
 def test_query_tickets_by_review_status():
     db = TestingSessionLocal()

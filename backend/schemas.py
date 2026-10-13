@@ -13,6 +13,12 @@ class CallCreate(BaseModel):
     language_confidence: Optional[float] = 1.0
     translated_transcript: Optional[str] = ""
     audio_filename: Optional[str] = ""
+    # --- patient coordination additions (all optional: older clients keep working) ---
+    patient_id: Optional[int] = Field(None, description="Staff-confirmed existing patient profile")
+    source_channel: Optional[str] = Field("manual", pattern="^(microphone|upload|manual)$")
+    recording_consent: Optional[bool] = False
+    transcription_job_id: Optional[str] = Field(None, max_length=32)
+    original_asr_transcript: Optional[str] = Field(None, max_length=20000, description="Untouched machine transcript when it came from live segments rather than a single job")
 
     @field_validator("caller_name", "patient_name", "room_number")
     @classmethod
@@ -73,6 +79,9 @@ class TicketResponse(BaseModel):
     room_number: str
     patient_name: str
     triage_notes: Optional[str] = ""
+    patient_id: Optional[int] = None
+    task_category: Optional[str] = "general_patient_support"
+    routing_reason: Optional[str] = ""
     created_at: datetime
     updated_at: datetime
     audit_logs: List[AuditLogResponse] = []
@@ -137,6 +146,13 @@ class CallResponse(BaseModel):
     created_at: datetime
     status: str
     tickets: List[TicketResponse] = []
+    patient_id: Optional[int] = None
+    patient_match_status: Optional[str] = "none"
+    extraction: Optional[Dict[str, Any]] = None
+    extraction_provider: Optional[str] = ""
+    source_channel: Optional[str] = "manual"
+    original_asr_transcript: Optional[str] = ""
+    transcript_edited: Optional[bool] = False
 
 class ProcessCallResponse(BaseModel):
     call: CallResponse
@@ -144,6 +160,9 @@ class ProcessCallResponse(BaseModel):
     emergency_detected: bool
     summary: str
     engine_used: str
+    structured_extraction: Optional[Dict[str, Any]] = None
+    patient_match_candidates: List[Dict[str, Any]] = []
+    extraction_warnings: List[str] = []
 
 class AudioTranscribeResponse(BaseModel):
     transcript: str
@@ -157,6 +176,9 @@ class AudioTranscribeResponse(BaseModel):
     max_amplitude: Optional[float] = 0.0
     language_uncertain: Optional[bool] = False
     suggested_language: Optional[str] = None
+    provider: Optional[str] = None
+    confidence_available: Optional[bool] = True
+    warnings: List[str] = []
 
 class TicketReviewRequest(BaseModel):
     reviewer_name: str = "Clinician Reviewer"

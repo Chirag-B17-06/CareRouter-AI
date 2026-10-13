@@ -66,3 +66,5 @@ Thumbs.db
 *.db-wal
 
 *.db
+
+backend/venv311/

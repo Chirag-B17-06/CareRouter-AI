@@ -21,7 +21,8 @@ import {
   AlertTriangle
 } from 'lucide-react';
 import { Call, Ticket } from '../types';
-import { fetchCalls, deleteCall, getAudioFileUrl } from '../services/api';
+import { fetchCalls, deleteCall } from '../services/api';
+import { AuthAudio } from './AuthAudio';
 
 interface CallsExplorerProps {
   onSelectTicket: (ticket: Ticket) => void;
@@ -308,12 +309,7 @@ export const CallsExplorer: React.FC<CallsExplorerProps> = ({
                           <span className="font-semibold">Original Voice Recording Audio:</span>
                           <span className="text-[10px] text-slate-500 font-mono truncate max-w-xs">{call.audio_filename}</span>
                         </div>
-                        <audio
-                          controls
-                          src={getAudioFileUrl(call.audio_filename)}
-                          className="h-8 max-w-full sm:max-w-xs"
-                          preload="none"
-                        />
+                        <AuthAudio filename={call.audio_filename} />
                       </div>
                     )}
 

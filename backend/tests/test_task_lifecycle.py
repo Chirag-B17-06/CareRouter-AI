@@ -102,7 +102,7 @@ def test_acknowledgement_lifecycle_transitions_status():
     ack_data = ack_resp.json()
 
     assert ack_data["is_acknowledged"] is True
-    assert ack_data["acknowledged_by"] == "Rapid Response Nurse Dave"
+    assert ack_data["acknowledged_by"] == "Test Administrator"
     assert ack_data["acknowledged_at"] is not None
     assert ack_data["status"] == "IN_PROGRESS"
 
@@ -189,7 +189,7 @@ def test_resolution_tracking_with_notes():
     res_data = resolve_resp.json()
 
     assert res_data["status"] == "RESOLVED"
-    assert res_data["resolved_by"] == "Nurse Betty"
+    assert res_data["resolved_by"] == "Test Administrator"
     assert "Ice pack applied" in res_data["resolution_notes"]
     assert res_data["resolved_at"] is not None
 

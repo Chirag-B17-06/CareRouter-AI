@@ -502,17 +502,40 @@ CLINICAL_ACTION_KEYWORDS = [
     "ಅಪಾಯಿಂಟ್‌ಮೆಂಟ್", "ರದ್ದು", "ತಜ್ಞ", "ಫಾಲೋ-ಅಪ್", "ಕಾಲ್ ಬ್ಯಾಕ್", "ಸಹಾಯ", "ನರ್ಸ್"
 ]
 
+# Patterns for segments that carry no request: greetings, self-introductions, pleasantries and bare
+# patient identification ("Patient Akshay, age 42").  A segment is only dropped if it POSITIVELY looks
+# like one of these.  Everything else is kept: an unrecognised sentence becomes a task flagged for
+# review rather than silently disappearing (an earlier keyword-allowlist dropped clinical statements
+# such as "Reports a possible right forearm fracture" whenever another sentence in the call matched).
+_GREETING_PATTERNS = [
+    r"^(?:hi|hello|hey|good\s+(?:morning|afternoon|evening|night)|namaste|namaskara|greetings)\b[\s,!.]*(?:there|everyone|sir|madam|doctor)?[\s,!.]*$",
+    r"^(?:hi|hello|hey)?[\s,]*(?:this is|my name is|i am|i'm|speaking|calling from|it's)\s+(?:the\s+)?[\w .'\-]{0,60}$",
+    r"^(?:thanks?|thank you|ok(?:ay)?|alright|bye|goodbye|please|regards|over)\b[\s,!.\w]{0,20}$",
+    r"^(?:नमस्ते|नमस्कार|हेलो|धन्यवाद|ನಮಸ್ಕಾರ|ಹಲೋ|ಧನ್ಯವಾದ)[\s,!.]*$",
+    # Hindi / Kannada greeting followed by a self-introduction ("... कमरा 108 से बोल रहा हूँ", "... ಕೋಣೆ 422 ರಿಂದ ಕರೆ ಮಾಡುತ್ತಿದ್ದೇನೆ")
+    r"^(?:नमस्ते|नमस्कार|हेलो|ನಮಸ್ಕಾರ|ಹಲೋ)[\s,!.]*.{0,60}?(?:बोल\s*रहा|बोल\s*रही|कॉल\s*कर|ಮಾತನಾಡುತ್ತಿದ್ದೇನೆ|ಕರೆ\s*ಮಾಡುತ್ತಿದ್ದೇನೆ|ಕರೆ\s*ಮಾಡುತ್ತಿದ್ದೇವೆ)[\w\s,!.ूँं]{0,12}$",
+    r"^(?:मैं|ನಾನು)\s+.{0,50}?(?:बोल\s*रहा|बोल\s*रही|ಮಾತನಾಡುತ್ತಿದ್ದೇನೆ)[\w\s,!.ूँं]{0,12}$",
+]
+_ID_ONLY = re.compile(
+    r"^(?:the\s+)?(?:patient|pt|mr|mrs|ms|miss|master|baby)\.?\s+[A-Za-z][\w'\-]*(?:\s+[A-Za-z][\w'\-]*){0,2}"
+    r"(?:\s*,?\s*(?:age[d]?\s*\d{1,3}|\d{1,3}\s*(?:years?|yrs?)(?:\s*old)?|(?:room|bed|ward)\s*[\w\-]+"
+    r"|(?:mrn|uhid|id)\s*[\w\-]+|male|female))*\s*$", re.IGNORECASE)
+
+
 def is_pure_intro_greeting(seg: str) -> bool:
-    """Returns True if the segment is merely a speaker greeting/introduction without actionable tasks."""
+    """True only if the segment is a greeting / introduction / bare patient identification with no request."""
     seg_clean = seg.strip().lower()
     for l_key in ["en", "hi", "kn"]:
         for pat in EMERGENCY_SYMPTOMS[l_key]:
             if re.search(pat, seg_clean if l_key == "en" else seg, re.IGNORECASE):
                 return False
     has_action = any(k in seg_clean or k in seg for k in CLINICAL_ACTION_KEYWORDS)
-    if not has_action:
+    if _ID_ONLY.match(seg.strip()) and not has_action:
         return True
-    return False
+    if has_action:
+        # "Hi, this is the nurse on 4th floor" mentions "nurse" but asks for nothing.
+        return any(re.match(pat, seg_clean, re.IGNORECASE) for pat in _GREETING_PATTERNS[:2])
+    return any(re.match(pat, seg_clean if pat.isascii() else seg, re.IGNORECASE) for pat in _GREETING_PATTERNS)
 
 def evaluate_clinical_urgency_and_evidence(text: str, lang: str = "en") -> Dict[str, Any]:
     """
@@ -705,6 +728,8 @@ def split_multilingual_transcript(transcript: str, lang: str = "en") -> List[str
     across Kannada, Hindi, and English without losing secondary requests.
     """
     cleaned = transcript.strip().replace("\r\n", "\n")
+    # Periods in titles/abbreviations ("Dr. Chen", "Mr. Rao") are not sentence boundaries.
+    cleaned = re.sub(r"\b(Dr|Mr|Mrs|Ms|Prof|Sr|Jr|St|No|Nos)\.", lambda m: m.group(1) + "․", cleaned, flags=re.IGNORECASE)
 
     # Multilingual split markers:
     # Punctuation boundaries: ., ?, !, ।, \n
@@ -719,7 +744,8 @@ def split_multilingual_transcript(transcript: str, lang: str = "en") -> List[str
         r"(?:\s+(?:ಇನ್ನೊಂದು ವಿಷಯ|ಅದರ ಜೊತೆಗೆ|ಹಾಗೆಯೇ|ಜೊತೆಗೆ)\s*)"
     )
 
-    raw_segments = re.split(split_pattern, cleaned, flags=re.IGNORECASE)
+    raw_segments = [r.replace("․", ".") if r else r for r in re.split(split_pattern, cleaned, flags=re.IGNORECASE)]
+    cleaned = cleaned.replace("․", ".")
     segments = []
 
     for seg in raw_segments:

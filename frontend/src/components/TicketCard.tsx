@@ -22,7 +22,7 @@ import {
   CreditCard,
   PhoneCall
 } from 'lucide-react';
-import { Ticket, TicketStatus, UrgencyTier } from '../types';
+import { Ticket, TicketStatus, UrgencyTier, STATUS_LABELS, isTerminalStatus } from '../types';
 
 interface TicketCardProps {
   ticket: Ticket;
@@ -103,9 +103,9 @@ export const TicketCard: React.FC<TicketCardProps> = ({
 
   // Status Badge and Next action
   const getNextStatus = (current: TicketStatus): TicketStatus | null => {
-    if (current === 'PENDING') return 'IN_PROGRESS';
+    if (current === 'PENDING' || current === 'AWAITING_REVIEW' || current === 'ASSIGNED') return 'IN_PROGRESS';
     if (current === 'IN_PROGRESS') return 'DISPATCHED';
-    if (current === 'DISPATCHED') return 'RESOLVED';
+    if (current === 'DISPATCHED' || current === 'AWAITING_PATIENT' || current === 'AWAITING_EXTERNAL') return 'RESOLVED';
     return null;
   };
 
@@ -120,7 +120,13 @@ export const TicketCard: React.FC<TicketCardProps> = ({
       case 'DISPATCHED':
         return 'bg-purple-500/10 text-purple-400 border-purple-500/30';
       case 'RESOLVED':
+      case 'CLOSED':
         return 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30';
+      case 'AWAITING_PATIENT':
+      case 'AWAITING_EXTERNAL':
+        return 'bg-violet-500/10 text-violet-300 border-violet-500/30';
+      default:
+        return 'bg-amber-500/10 text-amber-400 border-amber-500/30';
     }
   };
 
@@ -365,13 +371,13 @@ export const TicketCard: React.FC<TicketCardProps> = ({
               <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-950/70 text-emerald-300 border border-emerald-600/50 flex items-center gap-0.5">
                 <CheckCheck className="w-2.5 h-2.5 text-emerald-400" /> ACK
               </span>
-            ) : ticket.status !== 'RESOLVED' ? (
+            ) : !isTerminalStatus(ticket.status) ? (
               <span className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-950/60 text-amber-400 border border-amber-600/40">
                 UNACK
               </span>
             ) : null}
             <span className={`px-2 py-0.5 rounded text-[10px] font-bold border uppercase ${getStatusColor(ticket.status)}`}>
-              {ticket.status.replace(/_/g, ' ')}
+              {STATUS_LABELS[ticket.status] ?? ticket.status.replace(/_/g, ' ')}
             </span>
           </div>
         </div>
@@ -387,7 +393,7 @@ export const TicketCard: React.FC<TicketCardProps> = ({
             <span>Details &amp; Notes</span>
           </button>
 
-          {!ticket.is_acknowledged && ticket.status !== 'RESOLVED' && onAcknowledge && (
+          {!ticket.is_acknowledged && !isTerminalStatus(ticket.status) && onAcknowledge && (
             <button
               onClick={() => onAcknowledge(ticket.id)}
               id={`ack-ticket-${ticket.id}-btn`}

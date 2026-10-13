@@ -4,6 +4,7 @@ import csv
 import json
 import uuid
 import shutil
+import logging
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
@@ -14,7 +15,8 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 
-from database import init_db, get_db, Call, Ticket, AuditLog
+from database import init_db, get_db, Call, Ticket, AuditLog, SessionLocal
+from models_care import User, TranscriptionJob, AuditEvent, Patient
 from schemas import (
     CallCreate, CallResponse, TicketResponse, TicketUpdate,
     TicketNoteCreate, ProcessCallResponse, AudioTranscribeResponse,
@@ -23,7 +25,6 @@ from schemas import (
     ShiftHandoverResponse, DepartmentHandoverSummary
 )
 from audio_transcriber import (
-    validate_audio_file, transcribe_audio_file,
     UPLOAD_DIR, LANGUAGE_DISPLAY_NAMES, get_engine_status
 )
 from nlp_parser import process_real_transcript
@@ -31,28 +32,60 @@ from security import (
     mask_phone_number, redact_pii_text, sanitize_csv_cell,
     validate_safe_audio_filename, ALLOWED_AUDIO_EXTENSIONS
 )
+from config import get_settings
+from audit import record_audit, verify_chain
+from auth import (
+    router as auth_router, bootstrap_admin, require_permission, get_current_user, visible_team_for,
+)
+from ratelimit import rate_limit_middleware
+from routing import router as routing_router
+from patients import router as patients_router, conversation_router
+from scheduling import staff_router as scheduling_router, portal_router
+from patient_matching import find_candidates
+from extraction.service import extract_structured
+from tasks_service import (
+    calculate_sla_and_deadline, create_ticket, ALLOWED_STATUSES, TERMINAL_STATUSES,
+)
+from asr import jobs as asr_jobs, service as asr_service
+from asr.audio import validate_upload_metadata
+from asr.base import AsrError, InvalidAudio
+from asr.languages import normalize_language
+from routing import get_policy
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Initialize DB tables without any fake seed data
     init_db()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    asr_jobs.session_factory = SessionLocal
+    with SessionLocal() as startup_db:
+        bootstrap_admin(startup_db)
+        asr_jobs.recover_interrupted_jobs(startup_db)
+        asr_jobs.purge_expired_audio(startup_db)
     yield
 
 app = FastAPI(
     title="CareRouter AI API",
-    description="Multilingual Hospital Clinical Speech-to-Task Dispatch System (Kannada, Hindi, English)",
-    version="2.0.0",
+    description="Multilingual hospital conversation-to-action and patient coordination system",
+    version="3.0.0",
     lifespan=lifespan
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=get_settings().cors_allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+app.middleware("http")(rate_limit_middleware)
+
+app.include_router(auth_router)
+app.include_router(routing_router)
+app.include_router(patients_router)
+app.include_router(conversation_router)
+app.include_router(scheduling_router)
+app.include_router(portal_router)
 
 @app.middleware("http")
 async def security_headers_middleware(request, call_next):
@@ -62,47 +95,13 @@ async def security_headers_middleware(request, call_next):
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Cache-Control"] = "no-store"
     response.headers["Permissions-Policy"] = "camera=(), microphone=(self), geolocation=()"
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; "
         "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'"
     )
     return response
-
-def calculate_sla_and_deadline(
-    urgency: str,
-    explicit_deadline: Optional[str] = None,
-    created_at: Optional[datetime] = None
-) -> tuple[int, datetime]:
-    """Calculates SLA duration in minutes and target completion deadline timestamp based on urgency and stated deadline."""
-    base_time = created_at or datetime.now(timezone.utc)
-    if base_time.tzinfo is None:
-        base_time = base_time.replace(tzinfo=timezone.utc)
-
-    # Standard clinical SLA target durations:
-    # STAT_EMERGENCY: 5 minutes (critical bedside crash cart response)
-    # URGENT: 20 minutes (acute bedside nursing & assessment)
-    # ROUTINE: 120 minutes (standard inpatient accommodation)
-    # INQUIRY: 240 minutes (general inquiries)
-    sla_map = {
-        "STAT_EMERGENCY": 5,
-        "URGENT": 20,
-        "ROUTINE": 120,
-        "INQUIRY": 240
-    }
-    sla_mins = sla_map.get(urgency, 120)
-
-    if explicit_deadline:
-        dl_lower = explicit_deadline.lower()
-        if "within 30 min" in dl_lower:
-            sla_mins = min(sla_mins, 30)
-        elif "within 1 hour" in dl_lower or "within 1 hr" in dl_lower:
-            sla_mins = min(sla_mins, 60)
-        elif "within 2 hour" in dl_lower or "within 2 hr" in dl_lower:
-            sla_mins = min(sla_mins, 120)
-
-    deadline_at = base_time + timedelta(minutes=sla_mins)
-    return sla_mins, deadline_at
 
 def ticket_to_schema(t: Ticket) -> TicketResponse:
     return TicketResponse(
@@ -149,10 +148,31 @@ def ticket_to_schema(t: Ticket) -> TicketResponse:
         room_number=t.room_number,
         patient_name=t.patient_name,
         triage_notes=t.triage_notes or "",
+        patient_id=t.patient_id,
+        task_category=t.task_category or "general_patient_support",
+        routing_reason=t.routing_reason or "",
         created_at=t.created_at,
         updated_at=t.updated_at,
         audit_logs=[a for a in t.audit_logs]
     )
+
+def _ensure_visible(ticket: Ticket, user: User) -> None:
+    """Department-scoped roles may only touch tasks in their own team's queue (404, not 403)."""
+    team = visible_team_for(user)
+    if team is not None and ticket.assigned_team != team:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+
+
+def _audit_ticket(db: Session, user: User, action: str, ticket: Ticket, **detail) -> None:
+    record_audit(db, user=user, action=action, resource_type="task", resource_id=ticket.id,
+                 patient_id=ticket.patient_id, detail=detail)
+
+
+def _load_json(raw, default):
+    try:
+        return json.loads(raw) if raw else default
+    except ValueError:
+        return default
 
 def call_to_schema(c: Call) -> CallResponse:
     masked_phone = mask_phone_number(c.caller_phone) if c.caller_phone else ""
@@ -172,7 +192,14 @@ def call_to_schema(c: Call) -> CallResponse:
         audio_filename=c.audio_filename or "",
         created_at=c.created_at,
         status=c.status,
-        tickets=[ticket_to_schema(t) for t in c.tickets]
+        tickets=[ticket_to_schema(t) for t in c.tickets],
+        patient_id=c.patient_id,
+        patient_match_status=c.patient_match_status or "none",
+        extraction=_load_json(c.extraction_json, None) or None,
+        extraction_provider=c.extraction_provider or "",
+        source_channel=c.source_channel or "manual",
+        original_asr_transcript=c.original_asr_transcript or "",
+        transcript_edited=bool(c.original_asr_transcript and c.original_asr_transcript != c.raw_transcript),
     )
 
 @app.get("/api/health")
@@ -180,9 +207,8 @@ def health_check():
     return {
         "status": "healthy",
         "service": "CareRouter AI",
-        "version": "2.0.0",
+        "version": "3.0.0",
         "stt_engine": "faster-whisper",
-        "engine_details": get_engine_status(),
         "supported_languages": {
             "kn": "Kannada — ಕನ್ನಡ",
             "hi": "Hindi — हिन्दी",
@@ -190,63 +216,152 @@ def health_check():
         }
     }
 
+@app.get("/api/asr/status")
+def asr_status(user: User = Depends(require_permission("audio:transcribe"))):
+    """Which speech engines and languages are usable right now (drives the language picker)."""
+    s = get_settings()
+    return {
+        "providers": asr_service.describe_providers(),
+        "languages": asr_service.supported_language_catalog(),
+        "limits": {"max_upload_mb": s.asr_max_upload_mb, "max_duration_seconds": s.asr_max_duration_seconds,
+                   "audio_retention_hours": s.audio_retention_hours},
+        "extraction_provider": s.extraction_provider,
+        "notes": [
+            "The computer microphone only captures sound near the nurse; it does not capture the other side "
+            "of a phone call unless a telephony integration supplies that audio.",
+            "English is transcribed with the Whisper engine; IndicConformer covers Indian languages only.",
+        ],
+    }
+
+def _consent_flag(value: Optional[str]) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+@app.post("/api/audio/jobs", status_code=202)
+async def create_transcription_job(
+    audio_file: UploadFile = File(...),
+    language: Optional[str] = Form(None),
+    recording_consent: Optional[str] = Form(None),
+    retain_audio: Optional[str] = Form(None),
+    user: User = Depends(require_permission("audio:transcribe")),
+    db: Session = Depends(get_db),
+):
+    """Queue speech-to-text. Inference runs in a background worker, never inside this request."""
+    max_bytes = get_settings().asr_max_upload_mb * 1024 * 1024
+    data = await audio_file.read(max_bytes + 1)   # bounded read: an oversized upload is never fully buffered
+    try:
+        job = asr_jobs.submit_job(
+            db, user=user, data=data, filename=audio_file.filename or "recording.webm",
+            content_type=audio_file.content_type, language=language,
+            consent_confirmed=_consent_flag(recording_consent), retain_audio=_consent_flag(retain_audio),
+        )
+    except asr_jobs.JobRejected as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc))
+    return {"job_id": job.id, "status": job.status}
+
+
+@app.get("/api/audio/jobs/{job_id}")
+def get_transcription_job(job_id: str, user: User = Depends(require_permission("audio:transcribe")),
+                          db: Session = Depends(get_db)):
+    job = db.query(TranscriptionJob).filter(TranscriptionJob.id == job_id).first()
+    if not job or (job.requested_by_user_id != user.id and user.role != "admin"):
+        raise HTTPException(status_code=404, detail="Transcription job not found")
+    result = _load_json(job.result_json, None)
+    if job.status == "succeeded":
+        record_audit(db, user=user, action="transcript_viewed", resource_type="transcription_job",
+                     resource_id=job.id, commit=True)
+    return {
+        "job_id": job.id, "status": job.status, "language_requested": job.language_requested or "auto",
+        "provider_used": job.provider_used, "result": result, "error_code": job.error_code,
+        "error_message": job.error_message, "created_at": job.created_at, "finished_at": job.finished_at,
+        "audio_retained": bool(job.audio_path),
+    }
+
+
 @app.post("/api/audio/transcribe", response_model=AudioTranscribeResponse)
 async def transcribe_audio_endpoint(
     audio_file: UploadFile = File(...),
-    language: Optional[str] = Form(None)
+    language: Optional[str] = Form(None),
+    recording_consent: Optional[str] = Form(None),
+    user: User = Depends(require_permission("audio:transcribe")),
+    db: Session = Depends(get_db),
 ):
+    """Synchronous transcription for short clips (kept for older clients).
+
+    Prefer ``POST /api/audio/jobs``: long audio can exceed request timeouts here.  Audio is
+    deleted as soon as the response is built; it is never retained by this endpoint.
     """
-    Genuine Speech-to-Text endpoint for real microphone recordings or uploaded audio files.
-    Transcribes Kannada, Hindi, and English into their native scripts with confidence score.
-    """
-    file_bytes = await audio_file.read()
-    file_size = len(file_bytes)
-
+    max_bytes = get_settings().asr_max_upload_mb * 1024 * 1024
+    file_bytes = await audio_file.read(max_bytes + 1)
     try:
-        validate_audio_file(
-            filename=audio_file.filename or "recording.webm",
-            file_size=file_size,
-            content_type=audio_file.content_type
-        )
-    except ValueError as val_err:
-        raise HTTPException(status_code=400, detail=str(val_err))
+        validate_upload_metadata(audio_file.filename or "recording.webm", len(file_bytes), audio_file.content_type)
+    except InvalidAudio as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not _consent_flag(recording_consent):
+        raise HTTPException(status_code=400, detail="Recording authorisation is required before audio is processed.")
 
-    # Save audio file to uploads directory with unique ID
-    ext = Path(audio_file.filename or "recording.webm").suffix.lower()
-    if not ext:
-        ext = ".webm"
-    unique_filename = f"{uuid.uuid4().hex}{ext}"
-    saved_path = UPLOAD_DIR / unique_filename
-
+    from asr.audio import prepare_audio
+    ext = Path(audio_file.filename or "recording.webm").suffix.lower() or ".webm"
+    src = UPLOAD_DIR / f"{uuid.uuid4().hex}{ext}"
+    wav = UPLOAD_DIR / f"norm_{uuid.uuid4().hex}.wav"
     try:
-        with open(saved_path, "wb") as f:
-            f.write(file_bytes)
-
-        # Transcribe audio using faster-whisper
-        result = transcribe_audio_file(saved_path, language_preference=language)
-        result["audio_filename"] = unique_filename
-        return AudioTranscribeResponse(**result)
-
-    except Exception as e:
-        # Clean up temporary file on failure
-        if saved_path.exists():
-            saved_path.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail=f"Speech recognition error: {str(e)}")
+        src.write_bytes(file_bytes)
+        prepared = prepare_audio(src, wav)
+        result = asr_service.transcribe(prepared.wav_path, language)
+        record_audit(db, user=user, action="audio_transcribed_sync", resource_type="audio", commit=True,
+                     detail={"provider": result.provider, "seconds": result.duration_seconds})
+        data = result.to_dict()
+        data["audio_filename"] = ""
+        return AudioTranscribeResponse(**{k: v for k, v in data.items() if k in AudioTranscribeResponse.model_fields})
+    except InvalidAudio as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except AsrError as exc:
+        raise HTTPException(status_code=422 if exc.code == "unsupported_language" else 503,
+                            detail={"code": exc.code, "message": str(exc)})
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail="Speech recognition failed unexpectedly. Please retry.")
+    finally:
+        src.unlink(missing_ok=True)
+        wav.unlink(missing_ok=True)
 
 @app.get("/api/audio/{filename}")
-def stream_audio_file(filename: str):
-    """Serve uploaded audio recording for browser playback with path traversal protection."""
+def stream_audio_file(filename: str, user: User = Depends(require_permission("audio:read")),
+                      db: Session = Depends(get_db)):
+    """Serve a retained recording. Restricted by role, path-traversal safe, and audited."""
     file_path = validate_safe_audio_filename(filename, UPLOAD_DIR)
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Audio recording not found")
+    record_audit(db, user=user, action="audio_played", resource_type="audio", resource_id=file_path.name, commit=True)
     media_type = "audio/wav" if file_path.suffix.lower() == ".wav" else "audio/webm"
     return FileResponse(file_path, media_type=media_type)
 
+def _hospital_today():
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo(get_settings().hospital_timezone)).date()
+
+
+def _response_for_existing(db_call: Call, engine: str) -> ProcessCallResponse:
+    return ProcessCallResponse(
+        call=call_to_schema(db_call),
+        extracted_tickets=[ticket_to_schema(t) for t in db_call.tickets],
+        emergency_detected=any(t.urgency == "STAT_EMERGENCY" for t in db_call.tickets),
+        summary=db_call.summary or "Call already processed.",
+        engine_used=engine,
+        structured_extraction=_load_json(db_call.extraction_json, None) or None,
+        patient_match_candidates=_load_json(db_call.patient_match_candidates, []),
+    )
+
+
 @app.post("/api/calls/process-transcript", response_model=ProcessCallResponse)
-def process_transcript_endpoint(payload: CallCreate, db: Session = Depends(get_db)):
+def process_transcript_endpoint(
+    payload: CallCreate,
+    user: User = Depends(require_permission("conversation:write")),
+    db: Session = Depends(get_db),
+):
     """
-    Process an actual reviewed transcript: decompose into separate department tickets,
-    detect emergencies with negation, and store in SQLite with ACID rollback safety and idempotency.
+    Process a reviewed transcript: validate structured extraction, match (never auto-link) a patient,
+    create independent tasks, route each to a team with a recorded reason, all in one transaction.
+    Retries are safe: idempotency key and a duplicate guard prevent repeated conversations/tasks.
     """
     # 1. Input Validation: Prevent processing empty or whitespace-only transcripts
     cleaned_transcript = (payload.raw_transcript or "").strip()
@@ -255,19 +370,15 @@ def process_transcript_endpoint(payload: CallCreate, db: Session = Depends(get_d
             status_code=400,
             detail="Cannot process an empty or blank transcript. Please verify or input the conversation text."
         )
+    if len(cleaned_transcript) > 20000:
+        raise HTTPException(status_code=400, detail="Transcript is too long (maximum 20,000 characters).")
 
     # 2. Idempotency Key check: if client provided an idempotency key, return existing record
     if payload.idempotency_key and payload.idempotency_key.strip():
         existing_key = payload.idempotency_key.strip()
         existing_idempotent = db.query(Call).filter(Call.idempotency_key == existing_key).first()
         if existing_idempotent:
-            return ProcessCallResponse(
-                call=call_to_schema(existing_idempotent),
-                extracted_tickets=[ticket_to_schema(t) for t in existing_idempotent.tickets],
-                emergency_detected=any(t.urgency == "STAT_EMERGENCY" for t in existing_idempotent.tickets),
-                summary=existing_idempotent.summary or "Call already processed.",
-                engine_used="CareRouter Idempotent Cache"
-            )
+            return _response_for_existing(existing_idempotent, "CareRouter Idempotent Cache")
 
     # 3. Retry window duplicate guard (within 60 seconds) for identical transcript + patient + room
     existing = db.query(Call).filter(
@@ -279,63 +390,105 @@ def process_transcript_endpoint(payload: CallCreate, db: Session = Depends(get_d
     if existing:
         time_diff = (datetime.now(timezone.utc) - existing.created_at.replace(tzinfo=timezone.utc)).total_seconds()
         if time_diff < 60:
-            return ProcessCallResponse(
-                call=call_to_schema(existing),
-                extracted_tickets=[ticket_to_schema(t) for t in existing.tickets],
-                emergency_detected=any(t.urgency == "STAT_EMERGENCY" for t in existing.tickets),
-                summary=existing.summary or "Call already processed.",
-                engine_used="CareRouter Duplicate Guard"
-            )
+            return _response_for_existing(existing, "CareRouter Duplicate Guard")
 
-    # 4. Safe NLP Decomposition with graceful fallback (never drops clinical calls)
+    # 4. Optional link to a finished transcription job (keeps the untouched ASR text for traceability)
+    original_asr = ""
+    job_id = None
+    audio_name = ""
+    if payload.transcription_job_id:
+        job = db.query(TranscriptionJob).filter(TranscriptionJob.id == payload.transcription_job_id).first()
+        if not job or (job.requested_by_user_id != user.id and user.role != "admin"):
+            raise HTTPException(status_code=404, detail="Transcription job not found")
+        job_id = job.id
+        original_asr = (_load_json(job.result_json, {}) or {}).get("transcript", "")
+        audio_name = job.audio_path or ""
+
+    if not original_asr and payload.original_asr_transcript:
+        original_asr = payload.original_asr_transcript.strip()
+
+    # 5. Linked patient (explicitly chosen by staff) must exist
+    linked_patient: Optional[Patient] = None
+    if payload.patient_id is not None:
+        linked_patient = db.query(Patient).filter(Patient.id == payload.patient_id, Patient.status == "active").first()
+        if not linked_patient:
+            raise HTTPException(status_code=404, detail="Selected patient profile was not found")
+
+    # 6. Structured extraction with graceful fallback (never drops a clinical call)
+    extraction_json = "{}"
+    provider = "fallback"
+    warnings: List[str] = []
+    candidates: List[Dict[str, Any]] = []
     try:
-        extraction = process_real_transcript(
-            transcript=cleaned_transcript,
-            language=payload.language,
-            caller_name=payload.caller_name,
-            patient_name=payload.patient_name,
-            room_number=payload.room_number
+        outcome = extract_structured(
+            cleaned_transcript, payload.language, _hospital_today(),
+            caller_name=payload.caller_name, patient_name=payload.patient_name, room_number=payload.room_number,
         )
+        legacy = outcome.legacy
+        drafts = outcome.ticket_drafts
+        provider = outcome.provider
+        warnings = outcome.warnings
+        extraction_json = outcome.extraction.model_dump_json()
+        extraction = {
+            "caller_name": legacy["caller_name"], "patient_name": legacy["patient_name"],
+            "room_number": legacy["room_number"], "raw_transcript": cleaned_transcript,
+            "language": legacy["language"], "summary": legacy["summary"],
+            "engine_used": legacy["engine_used"] + ("" if provider == "rules" else " + LLM extraction"),
+        }
+        ex = outcome.extraction
+        # The original parser only recognises "Firstname Lastname"; use the validated extraction (or the
+        # staff-selected profile) when all it had was a placeholder.
+        placeholder_names = {"", "patient", "unknown patient"}
+        better_name = linked_patient.full_name if linked_patient else ex.patient.name
+        if better_name and (extraction["patient_name"] or "").strip().lower() in placeholder_names:
+            extraction["patient_name"] = better_name
+            for draft in drafts:
+                if (draft.get("patient_name") or "").strip().lower() in placeholder_names:
+                    draft["patient_name"] = better_name
+        if linked_patient is None:
+            cands = find_candidates(
+                db, name=ex.patient.name, dob=ex.patient.date_of_birth, age=ex.patient.age, mrn=ex.patient.patient_id,
+                phone=payload.caller_phone if ex.patient.caller_relationship == "self" else None,
+            )
+            candidates = [c.__dict__ for c in cands]
     except Exception as nlp_err:
         # Safe fallback: create a nursing review ticket so critical patient requests are never lost
+        logging.getLogger("carerouter").exception("Extraction failed (%s)", type(nlp_err).__name__)
         extraction = {
             "caller_name": payload.caller_name or "Unknown Caller",
             "patient_name": payload.patient_name or "Unknown Patient",
             "room_number": payload.room_number or "Unassigned",
             "raw_transcript": cleaned_transcript,
             "language": payload.language or "en",
-            "summary": f"Clinical intake recorded. Automated NLP decomposition encountered issue ({str(nlp_err)}); routed to nursing for manual triage.",
-            "emergency_detected": False,
+            "summary": "Clinical intake recorded. Automated decomposition encountered an issue; routed to nursing for manual triage.",
             "engine_used": "CareRouter Safe Fallback (NLP Error Recovered)",
-            "tickets": [
-                {
-                    "department": "Rapid Response & Critical Nursing",
-                    "category": "Nursing and patient care",
-                    "intent": "clinical_intake",
-                    "title": "Clinical Call Intake — Manual Review Required",
-                    "description": cleaned_transcript[:500],
-                    "raw_quote": cleaned_transcript[:200],
-                    "translated_quote": payload.translated_transcript or cleaned_transcript[:200],
-                    "language": payload.language or "en",
-                    "urgency": "URGENT",
-                    "priority_rationale": "Automated NLP extraction degraded; safe clinical default assigned.",
-                    "required_action": "Nurse in-charge to review caller request and triage immediately.",
-                    "explicit_deadline": None,
-                    "confidence_score": 0.5,
-                    "source_timestamp": None,
-                    "requires_human_review": True,
-                    "human_review_reason": f"NLP engine error ({str(nlp_err)}). Routed for manual clinical triage.",
-                    "urgency_evidence": {"fallback": True, "error": str(nlp_err)},
-                    "clinical_flags": ["nlp_fallback", "manual_review_required"],
-                    "assigned_to": "Triage Nurse",
-                    "room_number": payload.room_number or "Unassigned",
-                    "patient_name": payload.patient_name or "Unknown Patient",
-                    "triage_notes": f"Safe fallback ticket generated due to parser exception: {str(nlp_err)}"
-                }
-            ]
         }
+        drafts = [{
+            "department": "Rapid Response & Critical Nursing",
+            "category": "Nursing and patient care",
+            "intent": "clinical_intake",
+            "title": "Clinical Call Intake — Manual Review Required",
+            "description": cleaned_transcript[:500],
+            "raw_quote": cleaned_transcript[:200],
+            "translated_quote": payload.translated_transcript or cleaned_transcript[:200],
+            "language": payload.language or "en",
+            "urgency": "URGENT",
+            "priority_rationale": "Automated extraction degraded; safe clinical default assigned.",
+            "required_action": "Nurse in-charge to review caller request and triage immediately.",
+            "explicit_deadline": None,
+            "confidence_score": 0.5,
+            "source_timestamp": None,
+            "requires_human_review": True,
+            "human_review_reason": "NLP engine error. Routed for manual clinical triage.",
+            "urgency_evidence": {"fallback": True},
+            "clinical_flags": ["nlp_fallback", "manual_review_required"],
+            "assigned_to": "Triage Nurse",
+            "room_number": payload.room_number or "Unassigned",
+            "patient_name": payload.patient_name or "Unknown Patient",
+            "triage_notes": "Safe fallback ticket generated because automated extraction failed.",
+        }]
 
-    # 5. Database transaction with rollback protection
+    # 7. Database transaction with rollback protection
     try:
         db_call = Call(
             idempotency_key=payload.idempotency_key.strip() if payload.idempotency_key else None,
@@ -348,112 +501,69 @@ def process_transcript_endpoint(payload: CallCreate, db: Session = Depends(get_d
             language_confidence=payload.language_confidence or 1.0,
             translated_transcript=payload.translated_transcript or "",
             summary=extraction["summary"],
-            audio_filename=payload.audio_filename or "",
-            status="processed"
+            audio_filename=audio_name or (payload.audio_filename or ""),
+            status="processed",
+            patient_id=linked_patient.id if linked_patient else None,
+            patient_match_status="confirmed" if linked_patient else ("needs_confirmation" if candidates else "none"),
+            patient_match_candidates=json.dumps(candidates, default=str),
+            extraction_json=extraction_json, extraction_provider=provider,
+            source_channel=payload.source_channel or "manual", recording_consent=bool(payload.recording_consent),
+            original_asr_transcript=original_asr, transcription_job_id=job_id, created_by_user_id=user.id,
         )
         db.add(db_call)
         db.flush()
 
-        ticket_responses = []
-        for t_data in extraction["tickets"]:
-            sla_mins, deadline_dt = calculate_sla_and_deadline(
-                urgency=t_data["urgency"],
-                explicit_deadline=t_data.get("explicit_deadline")
+        tickets = []
+        for draft in drafts:
+            t = create_ticket(
+                db, draft, call_id=db_call.id, patient_id=db_call.patient_id, actor="AI Dispatch Engine",
+                source_note=f"Task extracted from recording #{db_call.id} (Language: {extraction['language'].upper()}).",
             )
-            db_ticket = Ticket(
-                call_id=db_call.id,
-                department=t_data["department"],
-                category=t_data.get("category", "Nursing and patient care"),
-                intent=t_data.get("intent", "general_request"),
-                title=t_data["title"],
-                description=t_data["description"],
-                raw_quote=t_data["raw_quote"],
-                translated_quote=t_data["translated_quote"],
-                language=t_data["language"],
-                urgency=t_data["urgency"],
-                priority_rationale=t_data.get("priority_rationale", ""),
-                required_action=t_data.get("required_action", ""),
-                explicit_deadline=t_data.get("explicit_deadline", None),
-                confidence_score=t_data.get("confidence_score", 1.0),
-                source_timestamp=t_data.get("source_timestamp", None),
-                requires_human_review=t_data.get("requires_human_review", False),
-                human_review_reason=t_data.get("human_review_reason", ""),
-                urgency_evidence=json.dumps(t_data.get("urgency_evidence", {})),
-                status="PENDING",
-                clinical_flags=json.dumps(t_data["clinical_flags"]),
-                assigned_to=t_data["assigned_to"],
-                assigned_team=t_data["department"],
-                assigned_staff="Unassigned",
-                is_acknowledged=False,
-                sla_minutes=sla_mins,
-                deadline_at=deadline_dt,
-                escalation_level=0,
-                room_number=t_data["room_number"],
-                patient_name=t_data["patient_name"],
-                triage_notes=t_data["triage_notes"]
-            )
-            db.add(db_ticket)
-            db.flush()
+            if t is not None:
+                tickets.append(t)
 
-            now_audit = datetime.now(timezone.utc)
-            audit = AuditLog(
-                ticket_id=db_ticket.id,
-                action="CREATED",
-                note=f"Task extracted from real recording #{db_call.id} (Language: {extraction['language'].upper()}).",
-                actor="AI Dispatch Engine",
-                created_at=now_audit
-            )
-            db_ticket.audit_logs.append(audit)
-
-            if db_ticket.requires_human_review:
-                flag_audit = AuditLog(
-                    ticket_id=db_ticket.id,
-                    action="FLAGGED_FOR_REVIEW",
-                    note=f"Flagged for human clinical review: {db_ticket.human_review_reason}",
-                    actor="AI Safety Guard",
-                    created_at=now_audit
-                )
-                db_ticket.audit_logs.append(flag_audit)
-
-            db.flush()
-            ticket_responses.append(ticket_to_schema(db_ticket))
-
+        record_audit(db, user=user, action="conversation_created", resource_type="conversation",
+                     resource_id=db_call.id, patient_id=db_call.patient_id,
+                     detail={"tasks": len(tickets), "provider": provider, "channel": db_call.source_channel,
+                             "patient_match": db_call.patient_match_status})
         db.commit()
         db.refresh(db_call)
 
         return ProcessCallResponse(
             call=call_to_schema(db_call),
-            extracted_tickets=ticket_responses,
-            emergency_detected=extraction["emergency_detected"],
+            extracted_tickets=[ticket_to_schema(t) for t in tickets],
+            emergency_detected=any(t.urgency == "STAT_EMERGENCY" for t in tickets),
             summary=extraction["summary"],
-            engine_used=extraction["engine_used"]
+            engine_used=extraction["engine_used"],
+            structured_extraction=_load_json(extraction_json, None) or None,
+            patient_match_candidates=candidates,
+            extraction_warnings=warnings,
         )
     except Exception as exc:
         db.rollback()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Database transaction failure during transcript intake: {str(exc)}"
-        )
+        logging.getLogger("carerouter").exception("Intake transaction failed (%s)", type(exc).__name__)
+        raise HTTPException(status_code=500, detail="Database transaction failure during transcript intake. Nothing was saved.")
 
 # Alias for backwards compatibility
 @app.post("/api/calls/process", response_model=ProcessCallResponse)
-def process_call_alias(payload: CallCreate, db: Session = Depends(get_db)):
-    return process_transcript_endpoint(payload, db)
+def process_call_alias(payload: CallCreate, user: User = Depends(require_permission("conversation:write")),
+                       db: Session = Depends(get_db)):
+    return process_transcript_endpoint(payload, user, db)
 
 @app.get("/api/calls", response_model=List[CallResponse])
-def list_calls(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
+def list_calls(limit: int = 50, offset: int = 0, user: User = Depends(require_permission("conversation:read")), db: Session = Depends(get_db)):
     calls = db.query(Call).order_by(desc(Call.created_at)).offset(offset).limit(limit).all()
     return [call_to_schema(c) for c in calls]
 
 @app.get("/api/calls/{call_id}", response_model=CallResponse)
-def get_call(call_id: int, db: Session = Depends(get_db)):
+def get_call(call_id: int, user: User = Depends(require_permission("conversation:read")), db: Session = Depends(get_db)):
     db_call = db.query(Call).filter(Call.id == call_id).first()
     if not db_call:
         raise HTTPException(status_code=404, detail="Call record not found")
     return call_to_schema(db_call)
 
 @app.delete("/api/calls/{call_id}")
-def delete_call(call_id: int, db: Session = Depends(get_db)):
+def delete_call(call_id: int, user: User = Depends(require_permission("conversation:delete")), db: Session = Depends(get_db)):
     db_call = db.query(Call).filter(Call.id == call_id).first()
     if not db_call:
         raise HTTPException(status_code=404, detail="Call record not found")
@@ -465,12 +575,14 @@ def delete_call(call_id: int, db: Session = Depends(get_db)):
             audio_path.unlink(missing_ok=True)
 
     try:
+        record_audit(db, user=user, action="conversation_deleted", resource_type="conversation",
+                     resource_id=db_call.id, patient_id=db_call.patient_id)
         db.delete(db_call)
         db.commit()
         return {"message": f"Call #{call_id} and its associated tasks deleted successfully."}
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database transaction failure deleting call: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database transaction failure deleting call")
 
 @app.get("/api/tickets", response_model=List[TicketResponse])
 def list_tickets(
@@ -487,9 +599,21 @@ def list_tickets(
     escalation_level: Optional[int] = Query(None),
     assigned_staff: Optional[str] = Query(None),
     assigned_team: Optional[str] = Query(None),
-    db: Session = Depends(get_db)
+    patient_id: Optional[int] = Query(None),
+    task_category: Optional[str] = Query(None),
+    limit: Optional[int] = Query(None, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    response: Response = None,
+    user: User = Depends(require_permission("task:read")), db: Session = Depends(get_db)
 ):
     query = db.query(Ticket)
+    scoped_team = visible_team_for(user)
+    if scoped_team is not None:
+        query = query.filter(Ticket.assigned_team == scoped_team)
+    if patient_id is not None:
+        query = query.filter(Ticket.patient_id == patient_id)
+    if task_category and task_category != "All":
+        query = query.filter(Ticket.task_category == task_category)
 
     if department and department != "All":
         query = query.filter(Ticket.department.ilike(f"%{department}%"))
@@ -539,30 +663,40 @@ def list_tickets(
         return ranks.get(t.urgency, 4) + esc_offset
 
     sorted_tickets = sorted(tickets, key=urgency_rank)
+    if response is not None:
+        response.headers["X-Total-Count"] = str(len(sorted_tickets))
+    if limit is not None:
+        sorted_tickets = sorted_tickets[offset:offset + limit]
     return [ticket_to_schema(t) for t in sorted_tickets]
 
 @app.get("/api/tickets/{ticket_id}", response_model=TicketResponse)
-def get_ticket(ticket_id: int, db: Session = Depends(get_db)):
+def get_ticket(ticket_id: int, user: User = Depends(require_permission("task:read")), db: Session = Depends(get_db)):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    _ensure_visible(ticket, user)
+    if ticket.patient_id:
+        _audit_ticket(db, user, "task_viewed", ticket)
+        db.commit()
     return ticket_to_schema(ticket)
 
 @app.patch("/api/tickets/{ticket_id}", response_model=TicketResponse)
-def update_ticket(ticket_id: int, payload: TicketUpdate, db: Session = Depends(get_db)):
+def update_ticket(ticket_id: int, payload: TicketUpdate, user: User = Depends(require_permission("task:write")), db: Session = Depends(get_db)):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    _ensure_visible(ticket, user)
 
     changes = []
+    if payload.status and payload.status not in ALLOWED_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Invalid status. Allowed: {', '.join(ALLOWED_STATUSES)}")
     if payload.status and payload.status != ticket.status:
         old_status = ticket.status
         ticket.status = payload.status
         changes.append(f"Status changed from {old_status} to {payload.status}")
-        if payload.status == "RESOLVED" and not ticket.resolved_at:
+        if payload.status in TERMINAL_STATUSES and not ticket.resolved_at:
             ticket.resolved_at = datetime.now(timezone.utc)
-            if payload.resolved_by:
-                ticket.resolved_by = payload.resolved_by
+            ticket.resolved_by = user.full_name
             if payload.resolution_notes:
                 ticket.resolution_notes = payload.resolution_notes
 
@@ -639,9 +773,10 @@ def update_ticket(ticket_id: int, payload: TicketUpdate, db: Session = Depends(g
             ticket_id=ticket.id,
             action="UPDATED",
             note="; ".join(changes),
-            actor="Clinical Staff"
+            actor=user.full_name
         )
         db.add(audit)
+        _audit_ticket(db, user, "task_updated", ticket, changes=len(changes))
 
     try:
         db.commit()
@@ -649,15 +784,16 @@ def update_ticket(ticket_id: int, payload: TicketUpdate, db: Session = Depends(g
         return ticket_to_schema(ticket)
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database transaction failure updating ticket: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database transaction failure updating ticket")
 
 @app.post("/api/tickets/{ticket_id}/acknowledge", response_model=TicketResponse)
-def acknowledge_ticket(ticket_id: int, payload: Optional[TicketAcknowledgeRequest] = None, db: Session = Depends(get_db)):
+def acknowledge_ticket(ticket_id: int, payload: Optional[TicketAcknowledgeRequest] = None, user: User = Depends(require_permission("task:write")), db: Session = Depends(get_db)):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    _ensure_visible(ticket, user)
 
-    staff = (payload.acknowledged_by if payload and payload.acknowledged_by else None) or "Staff Member"
+    staff = user.full_name
     now_utc = datetime.now(timezone.utc)
     ticket.is_acknowledged = True
     ticket.acknowledged_at = now_utc
@@ -681,13 +817,14 @@ def acknowledge_ticket(ticket_id: int, payload: Optional[TicketAcknowledgeReques
         return ticket_to_schema(ticket)
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database transaction failure acknowledging ticket: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database transaction failure acknowledging ticket")
 
 @app.post("/api/tickets/{ticket_id}/assign", response_model=TicketResponse)
-def assign_ticket(ticket_id: int, payload: TicketAssignRequest, db: Session = Depends(get_db)):
+def assign_ticket(ticket_id: int, payload: TicketAssignRequest, user: User = Depends(require_permission("task:assign")), db: Session = Depends(get_db)):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    _ensure_visible(ticket, user)
 
     changes = []
     if payload.assigned_staff is not None and payload.assigned_staff != ticket.assigned_staff:
@@ -706,7 +843,7 @@ def assign_ticket(ticket_id: int, payload: TicketAssignRequest, db: Session = De
         changes.append(f"Designation updated: {old_to} -> {payload.assigned_to}")
 
     if changes:
-        assigner = payload.assigner or "Coordinator"
+        assigner = user.full_name
         audit = AuditLog(
             ticket_id=ticket.id,
             action="ASSIGNED",
@@ -721,26 +858,28 @@ def assign_ticket(ticket_id: int, payload: TicketAssignRequest, db: Session = De
         return ticket_to_schema(ticket)
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database transaction failure assigning ticket: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database transaction failure assigning ticket")
 
 @app.post("/api/tickets/{ticket_id}/escalate", response_model=TicketResponse)
-def escalate_ticket(ticket_id: int, payload: TicketEscalateRequest, db: Session = Depends(get_db)):
+def escalate_ticket(ticket_id: int, payload: TicketEscalateRequest, user: User = Depends(require_permission("task:write")), db: Session = Depends(get_db)):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    _ensure_visible(ticket, user)
 
     now_utc = datetime.now(timezone.utc)
     target_level = payload.level if payload.level is not None else min((ticket.escalation_level or 0) + 1, 2)
     ticket.escalation_level = max(1, min(target_level, 2))
     ticket.escalated_at = now_utc
-    reason_line = f"[Level {ticket.escalation_level} by {payload.escalated_by}]: {payload.escalation_reason}"
+    escalated_by = user.full_name
+    reason_line = f"[Level {ticket.escalation_level} by {escalated_by}]: {payload.escalation_reason}"
     ticket.escalation_reason = f"{ticket.escalation_reason}\n{reason_line}".strip() if ticket.escalation_reason else reason_line
 
     audit = AuditLog(
         ticket_id=ticket.id,
         action="ESCALATED",
-        note=f"Task escalated to Level {ticket.escalation_level} by {payload.escalated_by}. Reason: {payload.escalation_reason}",
-        actor=payload.escalated_by or "Staff Supervisor"
+        note=f"Task escalated to Level {ticket.escalation_level} by {escalated_by}. Reason: {payload.escalation_reason}",
+        actor=escalated_by
     )
     db.add(audit)
     try:
@@ -749,18 +888,19 @@ def escalate_ticket(ticket_id: int, payload: TicketEscalateRequest, db: Session 
         return ticket_to_schema(ticket)
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database transaction failure escalating ticket: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database transaction failure escalating ticket")
 
 @app.post("/api/tickets/{ticket_id}/resolve", response_model=TicketResponse)
-def resolve_ticket(ticket_id: int, payload: TicketResolveRequest, db: Session = Depends(get_db)):
+def resolve_ticket(ticket_id: int, payload: TicketResolveRequest, user: User = Depends(require_permission("task:write")), db: Session = Depends(get_db)):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    _ensure_visible(ticket, user)
 
     now_utc = datetime.now(timezone.utc)
     ticket.status = "RESOLVED"
     ticket.resolved_at = now_utc
-    ticket.resolved_by = payload.resolved_by or "Staff Member"
+    ticket.resolved_by = user.full_name
     ticket.resolution_notes = payload.resolution_notes
 
     audit = AuditLog(
@@ -776,12 +916,12 @@ def resolve_ticket(ticket_id: int, payload: TicketResolveRequest, db: Session = 
         return ticket_to_schema(ticket)
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database transaction failure resolving ticket: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database transaction failure resolving ticket")
 
 @app.post("/api/tickets/check-escalations")
-def check_ticket_escalations(db: Session = Depends(get_db)):
+def check_ticket_escalations(user: User = Depends(require_permission("task:write")), db: Session = Depends(get_db)):
     """Scans open tickets and automatically escalates breached SLAs for high-urgency clinical concerns."""
-    active_tickets = db.query(Ticket).filter(Ticket.status != "RESOLVED").all()
+    active_tickets = db.query(Ticket).filter(Ticket.status.notin_(TERMINAL_STATUSES)).all()
     escalated_count = 0
     now_utc = datetime.now(timezone.utc)
 
@@ -808,12 +948,12 @@ def check_ticket_escalations(db: Session = Depends(get_db)):
             db.commit()
         except Exception as e:
             db.rollback()
-            raise HTTPException(status_code=500, detail=f"Database transaction failure during auto-escalation: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Database transaction failure during auto-escalation")
 
     return {"message": f"Escalation scan completed. {escalated_count} open tasks auto-escalated.", "escalated_count": escalated_count}
 
 @app.post("/api/tickets/{ticket_id}/review", response_model=TicketResponse)
-def review_ticket(ticket_id: int, payload: TicketReviewRequest, db: Session = Depends(get_db)):
+def review_ticket(ticket_id: int, payload: TicketReviewRequest, user: User = Depends(require_permission("task:write")), db: Session = Depends(get_db)):
     """
     Human-in-the-loop clinical review for uncertain or flagged extractions.
     Allows a human clinician to either APPROVE the extraction as-is or CORRECT fields
@@ -822,9 +962,10 @@ def review_ticket(ticket_id: int, payload: TicketReviewRequest, db: Session = De
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    _ensure_visible(ticket, user)
 
     now_utc = datetime.now(timezone.utc)
-    reviewer = payload.reviewer_name or "Clinician Reviewer"
+    reviewer = user.full_name
     ticket.is_reviewed = True
     ticket.reviewed_at = now_utc
     ticket.reviewed_by = reviewer
@@ -848,7 +989,8 @@ def review_ticket(ticket_id: int, payload: TicketReviewRequest, db: Session = De
         if payload.corrected_urgency and payload.corrected_urgency != ticket.urgency:
             old_urg = ticket.urgency
             ticket.urgency = payload.corrected_urgency
-            sla_mins, deadline_dt = calculate_sla_and_deadline(ticket.urgency, ticket.explicit_deadline, ticket.created_at)
+            sla_mins, deadline_dt = calculate_sla_and_deadline(
+                ticket.urgency, ticket.explicit_deadline, ticket.created_at, sla_map=get_policy(db)["sla_minutes"])
             ticket.sla_minutes = sla_mins
             ticket.deadline_at = deadline_dt
             changes.append(f"Urgency adjusted from {old_urg} to {payload.corrected_urgency} (SLA recalculated to {sla_mins}m)")
@@ -888,13 +1030,13 @@ def review_ticket(ticket_id: int, payload: TicketReviewRequest, db: Session = De
         return ticket_to_schema(ticket)
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database transaction failure during clinical review: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database transaction failure during clinical review")
 
 @app.get("/api/reports/shift-handover", response_model=ShiftHandoverResponse)
 def get_shift_handover_report(
     shift_hours: int = Query(8, ge=1, le=72),
     shift_lead: str = Query("Charge Nurse on Duty"),
-    db: Session = Depends(get_db)
+    user: User = Depends(require_permission("analytics:read")), db: Session = Depends(get_db)
 ):
     """
     Generates a structured clinical shift handover report for hospital huddles,
@@ -1032,7 +1174,7 @@ def export_tickets(
     status: Optional[str] = Query(None),
     since_hours: Optional[int] = Query(None),
     de_identify: bool = Query(False, description="De-identify patient personal information in exports (HIPAA / DISHA compliant)"),
-    db: Session = Depends(get_db)
+    user: User = Depends(require_permission("analytics:read")), db: Session = Depends(get_db)
 ):
     """
     Exports tickets in CSV or JSON format for hospital administrative reporting,
@@ -1118,10 +1260,11 @@ def export_tickets(
     )
 
 @app.delete("/api/tickets/{ticket_id}")
-def delete_ticket(ticket_id: int, db: Session = Depends(get_db)):
+def delete_ticket(ticket_id: int, user: User = Depends(require_permission("task:delete")), db: Session = Depends(get_db)):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    _ensure_visible(ticket, user)
 
     if ticket.status != "RESOLVED":
         raise HTTPException(
@@ -1131,20 +1274,22 @@ def delete_ticket(ticket_id: int, db: Session = Depends(get_db)):
 
     try:
         deleted_id = ticket.id
+        _audit_ticket(db, user, "task_deleted", ticket)
         db.delete(ticket)
         db.commit()
         return {"message": f"Resolved ticket #{deleted_id} deleted successfully."}
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database transaction failure deleting ticket: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database transaction failure deleting ticket")
 
 @app.post("/api/tickets/{ticket_id}/notes", response_model=TicketResponse)
-def add_ticket_note(ticket_id: int, payload: TicketNoteCreate, db: Session = Depends(get_db)):
+def add_ticket_note(ticket_id: int, payload: TicketNoteCreate, user: User = Depends(require_permission("task:write")), db: Session = Depends(get_db)):
     ticket = db.query(Ticket).filter(Ticket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(status_code=404, detail="Ticket not found")
+    _ensure_visible(ticket, user)
 
-    author = payload.author or "Staff"
+    author = user.full_name
     note_text = f"[{author}]: {payload.note}"
     current_notes = ticket.triage_notes or ""
     ticket.triage_notes = f"{current_notes}\n{note_text}".strip()
@@ -1162,19 +1307,20 @@ def add_ticket_note(ticket_id: int, payload: TicketNoteCreate, db: Session = Dep
         return ticket_to_schema(ticket)
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Database transaction failure adding note: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Database transaction failure adding note")
 
 @app.get("/api/audio/play/{filename}")
-def play_audio(filename: str):
+def play_audio(filename: str, user: User = Depends(require_permission("audio:read")), db: Session = Depends(get_db)):
     """Stream back recorded audio for verification with path traversal protection."""
     file_path = validate_safe_audio_filename(filename, UPLOAD_DIR)
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Audio recording not found")
+    record_audit(db, user=user, action="audio_played", resource_type="audio", resource_id=file_path.name, commit=True)
     media_type = "audio/wav" if file_path.suffix.lower() == ".wav" else "audio/webm"
     return FileResponse(file_path, media_type=media_type)
 
 @app.get("/api/analytics", response_model=AnalyticsResponse)
-def get_analytics(db: Session = Depends(get_db)):
+def get_analytics(user: User = Depends(require_permission("analytics:read")), db: Session = Depends(get_db)):
     total_calls = db.query(Call).count()
     tickets = db.query(Ticket).all()
 
@@ -1250,3 +1396,37 @@ def get_analytics(db: Session = Depends(get_db)):
         avg_triage_latency_ms=115.0,
         system_mode="Production Real Audio & Multilingual Engine"
     )
+
+
+# ---------------------------------------------------------------------------
+# Audit trail (administrators / compliance)
+# ---------------------------------------------------------------------------
+@app.get("/api/audit/events")
+def list_audit_events(
+    patient_id: Optional[int] = Query(None), action: Optional[str] = Query(None),
+    actor_user_id: Optional[int] = Query(None), page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
+    user: User = Depends(require_permission("audit:read")), db: Session = Depends(get_db),
+):
+    q = db.query(AuditEvent)
+    if patient_id is not None:
+        q = q.filter(AuditEvent.patient_id == patient_id)
+    if action:
+        q = q.filter(AuditEvent.action == action)
+    if actor_user_id is not None:
+        q = q.filter(AuditEvent.actor_user_id == actor_user_id)
+    total = q.count()
+    rows = q.order_by(AuditEvent.id.desc()).offset((page - 1) * page_size).limit(page_size).all()
+    return {
+        "total": total, "page": page, "page_size": page_size,
+        "items": [{
+            "id": r.id, "occurred_at": r.occurred_at, "actor_user_id": r.actor_user_id, "actor_role": r.actor_role,
+            "action": r.action, "resource_type": r.resource_type, "resource_id": r.resource_id,
+            "patient_id": r.patient_id, "outcome": r.outcome, "detail": _load_json(r.detail, {}),
+        } for r in rows],
+    }
+
+
+@app.get("/api/audit/verify")
+def verify_audit_chain(user: User = Depends(require_permission("audit:read")), db: Session = Depends(get_db)):
+    ok, broken_at = verify_chain(db)
+    return {"intact": ok, "first_broken_event_id": broken_at}

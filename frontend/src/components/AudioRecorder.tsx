@@ -21,9 +21,15 @@ import {
   VolumeX,
   Settings2
 } from 'lucide-react';
-import { uploadAndTranscribeAudio, processTranscript } from '../services/api';
-import { AudioTranscribeResult, ProcessCallResult, Ticket } from '../types';
+import { uploadAndTranscribeAudio, processTranscript, fetchAsrStatus } from '../services/api';
+import { AsrStatus, AudioTranscribeResult, ProcessCallResult, Ticket } from '../types';
+import { useLiveTranscription } from '../utils/useLiveTranscription';
+import { ConversationReview } from './ConversationReview';
 import { soundManager } from '../utils/audio';
+
+function newIdempotencyKey(): string {
+  return typeof crypto !== 'undefined' && 'randomUUID' in crypto ? crypto.randomUUID() : `k-${Math.random().toString(16).slice(2)}-${Date.now()}`;
+}
 
 function filenameFromAudioBlob(blob: Blob, fallback: string): string {
   const type = (blob.type || '').toLowerCase();
@@ -107,17 +113,30 @@ const DEMO_SCENARIOS = [
 interface AudioRecorderProps {
   onSuccess: (result: ProcessCallResult) => void;
   onNavigateToBoard: () => void;
+  canLinkPatient?: boolean;
+  onOpenPatients?: () => void;
 }
 
 export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   onSuccess,
-  onNavigateToBoard
+  onNavigateToBoard,
+  canLinkPatient = false,
+  onOpenPatients
 }) => {
+  // Recording authorisation: audio is never captured, uploaded or processed until this is confirmed.
+  const [recordingConsent, setRecordingConsent] = useState<boolean>(false);
+  const [liveEnabled, setLiveEnabled] = useState<boolean>(true);
+  const [asrStatus, setAsrStatus] = useState<AsrStatus | null>(null);
+  const [asrStatusError, setAsrStatusError] = useState<string | null>(null);
+  const [transcribeProgress, setTranscribeProgress] = useState<string>('');
+  const [sampleLoaded, setSampleLoaded] = useState<boolean>(false);
+  const [idempotencyKey, setIdempotencyKey] = useState<string>(() => newIdempotencyKey());
   // Input Mode: 'record' | 'upload'
   const [activeTab, setActiveTab] = useState<'record' | 'upload'>('record');
 
   // Language Selection
   const [selectedLanguage, setSelectedLanguage] = useState<string>('auto');
+  const live = useLiveTranscription({ language: selectedLanguage, consent: recordingConsent });
 
   // Caller & Patient details
   const [callerName, setCallerName] = useState<string>('');
@@ -166,6 +185,13 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const analyserRef = useRef<AnalyserNode | null>(null);
   const animFrameRef = useRef<number | null>(null);
   const silenceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Which speech engines / languages are really available right now
+  const loadAsrStatus = useCallback(() => {
+    setAsrStatusError(null);
+    fetchAsrStatus().then(setAsrStatus).catch((e: Error) => setAsrStatusError(e.message));
+  }, []);
+  useEffect(() => { loadAsrStatus(); }, [loadAsrStatus]);
 
   // Enumerate available microphone devices
   const loadAudioDevices = useCallback(async () => {
@@ -293,6 +319,11 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
   // Start Real Microphone Recording
   const startRecording = async () => {
+    if (!recordingConsent) {
+      setMicError('Please confirm recording authorisation before starting.');
+      return;
+    }
+    live.reset();
     setMicError(null);
     setSilenceWarning(null);
     setTranscribeNotice(null);
@@ -386,6 +417,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
       setIsRecording(true);
       setIsPaused(false);
       setRecordingSeconds(0);
+      if (liveEnabled) live.start(stream);
 
       // Start elapsed timer
       timerIntervalRef.current = setInterval(() => {
@@ -406,6 +438,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const pauseRecording = () => {
     if (mediaRecorderRef.current && isRecording && !isPaused) {
       mediaRecorderRef.current.pause();
+      live.pause();
       setIsPaused(true);
       if (timerIntervalRef.current) clearInterval(timerIntervalRef.current);
     }
@@ -415,6 +448,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   const resumeRecording = () => {
     if (mediaRecorderRef.current && isRecording && isPaused) {
       mediaRecorderRef.current.resume();
+      live.resume();
       setIsPaused(false);
       timerIntervalRef.current = setInterval(() => {
         setRecordingSeconds((prev) => prev + 1);
@@ -425,6 +459,8 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
   // Stop Recording with flush
   const stopRecording = () => {
     if (mediaRecorderRef.current && isRecording) {
+      // Flush the last live segment first so its audio is complete before the microphone is released.
+      void live.stop();
       mediaRecorderRef.current.stop();
       setIsRecording(false);
       setIsPaused(false);
@@ -448,6 +484,7 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     setTranscribeResult(null);
     setEditableTranscript('');
     setDispatchResult(null);
+    live.reset();
   };
 
   // Handle Uploaded File
@@ -489,13 +526,21 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
       setSelectedLanguage(overrideLanguage);
     }
 
+    if (!recordingConsent) {
+      alert('Please confirm recording authorisation before audio is processed.');
+      return;
+    }
     setIsTranscribing(true);
     setTranscribeNotice(null);
+    setTranscribeProgress('Uploading…');
     try {
       const filename = activeTab === 'record'
         ? filenameFromAudioBlob(audioInput, 'mic_recording.webm')
         : (uploadedFile?.name || 'uploaded_call.webm');
-      const result = await uploadAndTranscribeAudio(audioInput, langToUse, filename);
+      const result = await uploadAndTranscribeAudio(audioInput, langToUse, filename, {
+        recordingConsent,
+        onProgress: (state) => setTranscribeProgress(state === 'uploading' ? 'Uploading…' : state === 'queued' ? 'Waiting for a speech engine…' : 'Transcribing…'),
+      });
       setTranscribeResult(result);
       setEditableTranscript(result.transcript);
 
@@ -511,7 +556,27 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
       alert(`Transcription Failed: ${(err as Error).message}`);
     } finally {
       setIsTranscribing(false);
+      setTranscribeProgress('');
     }
+  };
+
+  // Use what the live (segment-by-segment) transcription produced instead of re-transcribing the whole recording
+  const useLiveTranscript = () => {
+    const text = live.text.trim();
+    if (!text) return;
+    const firstLang = live.segments.find((x) => x.language)?.language ?? (selectedLanguage !== 'auto' ? selectedLanguage : 'en');
+    setEditableTranscript(text);
+    setTranscribeResult({
+      transcript: text,
+      language: firstLang,
+      language_name: firstLang.toUpperCase(),
+      language_confidence: 0,
+      transcription_confidence: 0,
+      duration_seconds: recordingSeconds,
+      confidence_available: false,
+      provider: 'live segments',
+      warnings: ['Live transcript was produced in short segments, so words at segment edges may be split or missing. Review carefully.'],
+    });
   };
 
   // Process the Reviewed Transcript into Clinical Tickets
@@ -530,10 +595,18 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
         caller_phone: callerPhone.trim() || undefined,
         patient_name: patientName.trim() || undefined,
         room_number: roomNumber.trim() || undefined,
-        audio_filename: transcribeResult?.audio_filename
+        audio_filename: transcribeResult?.audio_filename || undefined,
+        source_channel: (transcribeResult?.job_id || transcribeResult?.provider === 'live segments') && !sampleLoaded
+          ? (activeTab === 'record' ? 'microphone' : 'upload')
+          : 'manual',
+        recording_consent: recordingConsent,
+        transcription_job_id: transcribeResult?.job_id,
+        original_asr_transcript: !transcribeResult?.job_id ? (transcribeResult?.transcript || undefined) : undefined,
+        idempotency_key: idempotencyKey
       });
 
       setDispatchResult(result);
+      setIdempotencyKey(newIdempotencyKey());
       onSuccess(result);
 
       if (result.emergency_detected) {
@@ -562,15 +635,20 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
     setRoomNumber(scenario.roomNumber);
     setSelectedLanguage(scenario.language);
     setEditableTranscript(scenario.transcript);
+    setSampleLoaded(true);
+    // Typed/sample text is NOT a speech-recognition result, so no ASR metadata is invented for it.
     setTranscribeResult({
       transcript: scenario.transcript,
       language: scenario.language,
       language_name: scenario.language === 'kn' ? 'Kannada' : scenario.language === 'hi' ? 'Hindi' : 'English',
-      language_confidence: 0.99,
-      transcription_confidence: 0.98,
-      duration_seconds: 8.2
+      language_confidence: 0,
+      transcription_confidence: 0,
+      duration_seconds: 0,
+      confidence_available: false,
+      provider: undefined,
+      warnings: ['This is typed sample text, not a recording. Names and details are fictional.']
     });
-    setTranscribeNotice(`Demo preset loaded: ${scenario.title}. Click 'Decompose & Dispatch Tasks' below to triage.`);
+    setTranscribeNotice(null);
     soundManager.playSuccessChime();
   };
 
@@ -604,10 +682,16 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
               aria-label="Speech recognition language"
               className="bg-transparent text-xs font-semibold text-slate-200 focus:outline-none cursor-pointer pr-2"
             >
-              <option value="auto">🌐 Auto Detect Language</option>
-              <option value="kn">ಕನ್ನಡ — Kannada</option>
-              <option value="hi">हिन्दी — Hindi</option>
-              <option value="en">English — English</option>
+              <option value="auto">🌐 Auto detect (English / Hindi / Kannada)</option>
+              {(asrStatus?.languages ?? [
+                { code: 'kn', name: 'Kannada — ಕನ್ನಡ', available: true },
+                { code: 'hi', name: 'Hindi — हिन्दी', available: true },
+                { code: 'en', name: 'English', available: true },
+              ]).map((l) => (
+                <option key={l.code} value={l.code} disabled={!l.available}>
+                  {l.name}{l.available ? '' : ' (engine not installed)'}
+                </option>
+              ))}
             </select>
           </div>
         </div>
@@ -619,6 +703,46 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
             <strong>Patient Privacy &amp; Recording Consent:</strong> Obtain explicit consent before recording hospital conversations. Audio is processed for clinical triage and task dispatch. Decision support prototype only.
           </span>
         </div>
+
+        <div className="p-3 rounded-xl bg-sky-500/10 border border-sky-500/30 text-[11px] text-sky-200 flex items-start gap-2">
+          <Mic className="w-4 h-4 text-sky-400 shrink-0 mt-0.5" />
+          <span>
+            <strong>What the microphone hears:</strong> only sound near this computer (the nurse speaking). It does{' '}
+            <u>not</u> capture the other person on a separate phone call unless a telephony integration supplies that audio.
+            {asrStatus && asrStatus.limits.audio_retention_hours === 0 && ' Audio is deleted from the server as soon as it has been transcribed.'}
+          </span>
+        </div>
+
+        <label className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-950 border border-slate-700 text-xs text-slate-200 cursor-pointer">
+          <input
+            type="checkbox"
+            id="recording-consent-checkbox"
+            className="mt-0.5 h-4 w-4"
+            checked={recordingConsent}
+            onChange={(e) => setRecordingConsent(e.target.checked)}
+          />
+          <span>
+            I confirm that the people on this conversation have been informed and agree to it being recorded and processed, or that
+            hospital policy authorises it. <span className="text-slate-500">Required before the microphone starts or any audio is uploaded.</span>
+          </span>
+        </label>
+
+        <label className="flex items-center gap-2 text-[11px] text-slate-400">
+          <input type="checkbox" checked={liveEnabled} onChange={(e) => setLiveEnabled(e.target.checked)} disabled={isRecording} />
+          <span>Show a live transcript while recording (the audio is recognised on the server in ~15-second segments)</span>
+        </label>
+
+        {asrStatusError && (
+          <div role="alert" className="p-2.5 rounded-lg bg-rose-950/50 border border-rose-500/40 text-[11px] text-rose-200 flex items-center justify-between gap-2">
+            <span>Speech engine status unavailable: {asrStatusError}</span>
+            <button type="button" onClick={loadAsrStatus} className="px-2 py-1 rounded bg-white/10 hover:bg-white/20 font-semibold">Retry</button>
+          </div>
+        )}
+        {asrStatus && !asrStatus.providers.some((p) => p.available) && (
+          <div role="alert" className="p-2.5 rounded-lg bg-amber-950/50 border border-amber-500/40 text-[11px] text-amber-200">
+            No speech engine is currently available on the server, so audio cannot be transcribed. You can still type the conversation below.
+          </div>
+        )}
       </div>
 
       {/* Caller & Patient Information Fields */}
@@ -677,15 +801,15 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
           <div className="flex items-center gap-2">
             <Sparkles className="w-4 h-4 text-indigo-400" />
             <h3 className="text-xs font-bold text-white uppercase tracking-wider">
-              Clinical Demo Presets &bull; Instant Evaluation Scenarios
+              Fictional sample conversations
             </h3>
           </div>
           <span className="text-[10px] text-indigo-300 font-semibold bg-indigo-500/20 px-2 py-0.5 rounded border border-indigo-500/30">
-            One-Click Test Cases
+            Sample text only
           </span>
         </div>
         <p className="text-[11px] text-slate-400">
-          Select any real-world hospital call scenario below to auto-populate transcripts and test multilingual decomposition, negation safeguards, or clinical review without needing a microphone.
+          Load a fictional example into the transcript box to try the review and task-routing steps without a microphone. These are typed samples, not recordings, and contain no real patient data.
         </p>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5 pt-1">
           {DEMO_SCENARIOS.map((scenario) => (
@@ -877,7 +1001,9 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                   <button
                     onClick={startRecording}
                     id="start-mic-recording-btn"
-                    className="px-6 py-3 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-bold text-sm shadow-xl shadow-red-600/30 flex items-center gap-2 active:scale-95 transition-all"
+                    disabled={!recordingConsent}
+                    title={recordingConsent ? undefined : 'Confirm recording authorisation first'}
+                    className="disabled:opacity-40 disabled:cursor-not-allowed px-6 py-3 rounded-xl bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-500 hover:to-rose-500 text-white font-bold text-sm shadow-xl shadow-red-600/30 flex items-center gap-2 active:scale-95 transition-all"
                   >
                     <Mic className="w-4 h-4 fill-current" />
                     <span>{recordedAudioBlob ? 'Record Again' : 'Start Recording'}</span>
@@ -950,12 +1076,12 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                     </button>
                     <button
                       onClick={() => handleTranscribeAudio()}
-                      disabled={isTranscribing}
+                      disabled={isTranscribing || !recordingConsent}
                       id="transcribe-recording-btn"
                       className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs shadow-md shadow-sky-600/30 flex items-center gap-1.5 disabled:opacity-50"
                     >
                       <Sparkles className="w-3.5 h-3.5" />
-                      <span>{isTranscribing ? 'Transcribing with Whisper...' : 'Transcribe Audio'}</span>
+                      <span>{isTranscribing ? (transcribeProgress || 'Transcribing…') : 'Transcribe Audio'}</span>
                     </button>
                   </div>
                 </div>
@@ -1018,16 +1144,61 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
 
                 <button
                   onClick={() => handleTranscribeAudio()}
-                  disabled={isTranscribing}
+                  disabled={isTranscribing || !recordingConsent}
                   id="transcribe-uploaded-file-btn"
                   className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs shadow-md shadow-sky-600/30 flex items-center gap-1.5 disabled:opacity-50"
                 >
                   <Sparkles className="w-3.5 h-3.5" />
-                  <span>{isTranscribing ? 'Transcribing with Whisper...' : 'Transcribe Audio'}</span>
+                  <span>{isTranscribing ? (transcribeProgress || 'Transcribing…') : 'Transcribe Audio'}</span>
                 </button>
               </div>
             )}
 
+          </div>
+        )}
+
+        {/* Manual entry: no audio required */}
+        {!transcribeResult && !isRecording && (
+          <div className="flex items-center justify-between gap-2 flex-wrap text-xs text-slate-400">
+            <span>No audio? You can type the conversation instead.</span>
+            <button
+              type="button"
+              id="manual-transcript-btn"
+              onClick={() => {
+                setSampleLoaded(false);
+                setTranscribeResult({
+                  transcript: '', language: selectedLanguage !== 'auto' ? selectedLanguage : 'en', language_name: 'Typed', language_confidence: 0,
+                  transcription_confidence: 0, duration_seconds: 0, confidence_available: false, warnings: ['Entered manually — no speech recognition was used.'],
+                });
+              }}
+              className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold"
+            >
+              Type or paste a transcript
+            </button>
+          </div>
+        )}
+
+        {/* Live transcript (segment-by-segment, server-side recognition) */}
+        {activeTab === 'record' && recordingConsent && (isRecording || live.segments.length > 0) && (
+          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2" aria-live="polite">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-1.5">
+                <Activity className="w-3.5 h-3.5 text-emerald-400" /> Live transcript
+                {isRecording && <span className="px-1.5 py-0.5 rounded bg-red-600 text-white text-[9px] animate-pulse">REC</span>}
+              </h3>
+              <span className="text-[10px] text-slate-500">Updates every ~15 s after each segment is recognised on the server</span>
+            </div>
+            {live.segments.length === 0 && isRecording && <p className="text-xs text-slate-500">Waiting for the first segment…</p>}
+            <p className="text-sm text-slate-100 leading-relaxed whitespace-pre-wrap kannada-text hindi-text">{live.text}</p>
+            <div className="flex flex-wrap gap-2 text-[10px] text-slate-500">
+              {live.pending && <span>Transcribing latest segment…</span>}
+              {live.failed > 0 && <span className="text-rose-300">{live.failed} segment(s) failed — use “Transcribe Audio” on the full recording.</span>}
+            </div>
+            {!isRecording && live.text && !live.pending && (
+              <button type="button" onClick={useLiveTranscript} className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-xs font-semibold">
+                Use this live transcript for review
+              </button>
+            )}
           </div>
         )}
 
@@ -1057,7 +1228,10 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                   </span>
                 )}
                 <span className="text-[11px] text-slate-400">
-                  Confidence: {Math.round((transcribeResult.transcription_confidence || transcribeResult.language_confidence) * 100)}%
+                  {transcribeResult.provider ? `Engine: ${transcribeResult.provider} · ` : ''}
+                  {transcribeResult.confidence_available === false
+                    ? 'Confidence not provided by this source'
+                    : `Confidence: ${Math.round((transcribeResult.transcription_confidence || transcribeResult.language_confidence) * 100)}%`}
                 </span>
               </div>
             </div>
@@ -1077,21 +1251,21 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                 <div className="flex items-center gap-2 flex-wrap pt-1">
                   <button
                     onClick={() => handleTranscribeAudio('kn')}
-                    disabled={isTranscribing}
+                    disabled={isTranscribing || !recordingConsent}
                     className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-purple-900/60 border border-purple-500/40 text-purple-300 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50"
                   >
                     <span>ಕನ್ನಡ (Kannada)</span>
                   </button>
                   <button
                     onClick={() => handleTranscribeAudio('hi')}
-                    disabled={isTranscribing}
+                    disabled={isTranscribing || !recordingConsent}
                     className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-orange-900/60 border border-orange-500/40 text-orange-300 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50"
                   >
                     <span>हिन्दी (Hindi)</span>
                   </button>
                   <button
                     onClick={() => handleTranscribeAudio('en')}
-                    disabled={isTranscribing}
+                    disabled={isTranscribing || !recordingConsent}
                     className="px-3 py-1.5 rounded-lg bg-slate-900 hover:bg-sky-900/60 border border-sky-500/40 text-sky-300 text-xs font-semibold flex items-center gap-1.5 transition-colors disabled:opacity-50"
                   >
                     <span>English</span>
@@ -1135,8 +1309,14 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
               </div>
             )}
 
+            {transcribeResult.warnings && transcribeResult.warnings.length > 0 && (
+              <div role="status" className="p-3 rounded-xl bg-sky-950/40 border border-sky-500/30 text-[11px] text-sky-200 space-y-1">
+                {transcribeResult.warnings.map((w) => <p key={w}>{w}</p>)}
+              </div>
+            )}
+
             <p className="text-xs text-slate-400">
-              The speech was transcribed in its native script. Review, correct medical terms or names, then click below to generate department tickets.
+              Review and correct the text (names, medical terms, numbers) before submitting. The original machine transcript is kept alongside your corrected version.
             </p>
 
             {/* Editable Textarea in Native Unicode Font */}
@@ -1213,6 +1393,8 @@ export const AudioRecorder: React.FC<AudioRecorderProps> = ({
                 </div>
               ))}
             </div>
+
+            <ConversationReview result={dispatchResult} canLinkPatient={canLinkPatient} onOpenPatients={onOpenPatients} />
 
             <div className="pt-2 flex justify-end">
               <button

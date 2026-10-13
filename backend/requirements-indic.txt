@@ -1,0 +1,14 @@
+# OPTIONAL: dependencies for the AI4Bharat IndicConformer speech engine (see docs/ASR_SETUP.md).
+# Not installed by default: the model is large, gated on Hugging Face, and runs custom code
+# (trust_remote_code). Install into the same virtualenv only on a host that will serve it.
+#
+# Versions follow the model card for ai4bharat/indic-conformer-600m-multilingual. Install a torch /
+# torchaudio build that matches the host (CPU or CUDA) from https://pytorch.org/get-started/locally/
+# *before* running `pip install -r requirements-indic.txt`.
+transformers
+torch
+torchaudio
+onnx==1.20.1
+onnxruntime==1.20.1
+# GPU hosts: replace onnxruntime with onnxruntime-gpu==1.20.1 (do not install both).
+huggingface_hub

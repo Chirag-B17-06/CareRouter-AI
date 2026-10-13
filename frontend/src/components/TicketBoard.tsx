@@ -20,7 +20,7 @@ import {
   Timer,
   ShieldAlert
 } from 'lucide-react';
-import { Ticket, TicketStatus, UrgencyTier } from '../types';
+import { Ticket, TicketStatus, UrgencyTier, STATUS_LABELS, ALL_STATUSES, isTerminalStatus } from '../types';
 import { TicketCard } from './TicketCard';
 
 interface TicketBoardProps {
@@ -48,6 +48,14 @@ const DEPARTMENTS = [
   'Clinical Follow-up & Care Coordination'
 ];
 
+// Kanban lanes group the nine lifecycle statuses into four columns.
+const LANES: Array<{ key: string; title: string; color: string; statuses: TicketStatus[] }> = [
+  { key: 'new', title: 'New / Awaiting review', color: 'text-amber-400 border-amber-500/30', statuses: ['PENDING', 'AWAITING_REVIEW'] },
+  { key: 'active', title: 'Assigned / In progress', color: 'text-sky-400 border-sky-500/30', statuses: ['ASSIGNED', 'IN_PROGRESS'] },
+  { key: 'waiting', title: 'Dispatched / Waiting', color: 'text-purple-400 border-purple-500/30', statuses: ['DISPATCHED', 'AWAITING_PATIENT', 'AWAITING_EXTERNAL'] },
+  { key: 'done', title: 'Resolved / Closed', color: 'text-emerald-400 border-emerald-500/30', statuses: ['RESOLVED', 'CLOSED'] },
+];
+
 export const TicketBoard: React.FC<TicketBoardProps> = ({
   tickets,
   onSelectTicket,
@@ -63,6 +71,14 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [viewMode, setViewMode] = useState<'grid' | 'kanban'>('grid');
   const [quickLifecycleFilter, setQuickLifecycleFilter] = useState<'all' | 'overdue' | 'unack' | 'escalated' | 'review'>('all');
+
+  // Teams can be added by administrators, so tabs include any team that actually has tasks.
+  const departmentTabs = [
+    ...DEPARTMENTS,
+    ...Array.from(new Set(tickets.map((t) => t.assigned_team || t.department)))
+      .filter((d) => d && !DEPARTMENTS.some((known) => known.toLowerCase() === d.toLowerCase()))
+      .sort(),
+  ];
 
   // Filter tickets
   const filteredTickets = tickets.filter((t) => {
@@ -83,7 +99,7 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
     if (quickLifecycleFilter === 'overdue' && !t.is_overdue) {
       return false;
     }
-    if (quickLifecycleFilter === 'unack' && (t.is_acknowledged || t.status === 'RESOLVED')) {
+    if (quickLifecycleFilter === 'unack' && (t.is_acknowledged || isTerminalStatus(t.status))) {
       return false;
     }
     if (quickLifecycleFilter === 'escalated' && (!t.escalation_level || t.escalation_level <= 0)) {
@@ -121,7 +137,7 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
   };
 
   const overdueCount = tickets.filter((t) => t.is_overdue).length;
-  const unackCount = tickets.filter((t) => !t.is_acknowledged && t.status !== 'RESOLVED').length;
+  const unackCount = tickets.filter((t) => !t.is_acknowledged && !isTerminalStatus(t.status)).length;
   const escalatedCount = tickets.filter((t) => t.escalation_level && t.escalation_level > 0).length;
   const reviewCount = tickets.filter((t) => t.requires_human_review && !t.is_reviewed).length;
 
@@ -144,7 +160,8 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
     if (deptName.includes('Facilities')) return 'Facilities';
     if (deptName.includes('Helpdesk') || deptName.includes('Information')) return 'Helpdesk';
     if (deptName.includes('Follow-up') || deptName.includes('Liaison')) return 'Callbacks';
-    return 'Admin & Discharge';
+    if (deptName.includes('Admin') || deptName.includes('Discharge')) return 'Admin & Discharge';
+    return deptName.split(/\s+/).slice(0, 2).join(' ');
   };
 
   const getDeptIcon = (deptName: string) => {
@@ -217,10 +234,9 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
               className="px-3 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-200 focus:outline-none focus:border-sky-500 cursor-pointer"
             >
               <option value="All">All Statuses</option>
-              <option value="PENDING">Pending Triage</option>
-              <option value="IN_PROGRESS">In Progress</option>
-              <option value="DISPATCHED">Dispatched</option>
-              <option value="RESOLVED">Resolved</option>
+              {ALL_STATUSES.map((st) => (
+                <option key={st} value={st}>{STATUS_LABELS[st]}</option>
+              ))}
             </select>
 
             {/* Layout View Toggle */}
@@ -329,7 +345,7 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
 
         {/* Department Filter Tabs */}
         <div className="flex items-center gap-1.5 overflow-x-auto pb-1 pt-1 no-scrollbar">
-          {DEPARTMENTS.map((dept) => {
+          {departmentTabs.map((dept) => {
             const isSelected = selectedDept === dept;
             const count = getDeptCount(dept);
             const DeptIcon = getDeptIcon(dept);
@@ -421,23 +437,17 @@ export const TicketBoard: React.FC<TicketBoardProps> = ({
       ) : (
         /* Kanban Columns View */
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-start">
-          {(['PENDING', 'IN_PROGRESS', 'DISPATCHED', 'RESOLVED'] as TicketStatus[]).map((colStatus) => {
-            const colTickets = filteredTickets.filter((t) => t.status === colStatus);
-            const colTitles: Record<TicketStatus, { title: string; color: string }> = {
-              PENDING: { title: 'Pending Triage', color: 'text-amber-400 border-amber-500/30' },
-              IN_PROGRESS: { title: 'In Progress', color: 'text-sky-400 border-sky-500/30' },
-              DISPATCHED: { title: 'Dispatched', color: 'text-purple-400 border-purple-500/30' },
-              RESOLVED: { title: 'Resolved', color: 'text-emerald-400 border-emerald-500/30' }
-            };
+          {LANES.map((lane) => {
+            const colTickets = filteredTickets.filter((t) => lane.statuses.includes(t.status));
 
             return (
               <div
-                key={colStatus}
+                key={lane.key}
                 className="bg-slate-900/50 border border-slate-800/80 rounded-2xl p-3 flex flex-col space-y-3"
               >
                 <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-                  <h4 className={`text-xs font-bold ${colTitles[colStatus].color}`}>
-                    {colTitles[colStatus].title}
+                  <h4 className={`text-xs font-bold ${lane.color}`}>
+                    {lane.title}
                   </h4>
                   <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-800 text-slate-300">
                     {colTickets.length}

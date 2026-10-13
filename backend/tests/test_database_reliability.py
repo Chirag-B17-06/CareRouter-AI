@@ -273,12 +273,13 @@ def test_backward_compatible_column_migrations(tmp_path):
 
 def test_safe_fallback_on_nlp_parser_degradation(monkeypatch):
     """Verify that if the NLP engine throws an exception, CareRouter never drops the clinical call."""
-    import main
+    import extraction.rules as rules_module
 
     def mock_broken_nlp(*args, **kwargs):
         raise RuntimeError("Simulated transient NLP parser failure")
 
-    monkeypatch.setattr(main, "process_real_transcript", mock_broken_nlp)
+    # The rule engine is now invoked through the extraction package.
+    monkeypatch.setattr(rules_module, "process_real_transcript", mock_broken_nlp)
 
     payload = {
         "caller_name": "Attendant",

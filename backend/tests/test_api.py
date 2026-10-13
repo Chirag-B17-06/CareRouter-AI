@@ -289,7 +289,8 @@ def test_ticket_status_update_and_notes():
         "author": "Dr. Rao"
     })
     assert note_res.status_code == 200
-    assert "Dr. Rao" in note_res.json()["triage_notes"]
+    # Actor identity now comes from the authenticated session, not from client-supplied names.
+    assert "Test Administrator" in note_res.json()["triage_notes"]
 
 def test_delete_call_and_tickets():
     """Test deleting a call record and verifying its tickets are removed."""

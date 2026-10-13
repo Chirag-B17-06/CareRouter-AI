@@ -17,7 +17,8 @@ import {
   FileText
 } from 'lucide-react';
 import { ShiftHandoverReport } from '../types';
-import { fetchShiftHandoverReport, getExportTicketsUrl } from '../services/api';
+import { fetchShiftHandoverReport } from '../services/api';
+import { downloadExport } from '../services/careApi';
 
 interface ShiftHandoverModalProps {
   isOpen: boolean;
@@ -311,29 +312,25 @@ export const ShiftHandoverModal: React.FC<ShiftHandoverModalProps> = ({
                 </div>
 
                 <div className="flex flex-wrap items-center gap-3 pt-1">
-                  <a
-                    href={getExportTicketsUrl('csv', deIdentify)}
-                    download={deIdentify ? "carerouter_deidentified_tickets.csv" : "carerouter_tickets_export.csv"}
-                    target="_blank"
-                    rel="noreferrer"
+                  <button
+                    type="button"
+                    onClick={() => downloadExport('csv', deIdentify).catch((e) => alert(e.message))}
                     id="export-tickets-csv-btn"
                     className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-md shadow-emerald-600/20 flex items-center gap-2 transition-all"
                   >
                     <FileSpreadsheet className="w-4 h-4" />
                     <span>{deIdentify ? "Export De-Identified CSV (Safe Excel / EHR)" : "Export CSV Spreadsheet (Excel / EHR)"}</span>
-                  </a>
+                  </button>
 
-                  <a
-                    href={getExportTicketsUrl('json', deIdentify)}
-                    download={deIdentify ? "carerouter_deidentified_tickets.json" : "carerouter_tickets_export.json"}
-                    target="_blank"
-                    rel="noreferrer"
+                  <button
+                    type="button"
+                    onClick={() => downloadExport('json', deIdentify).catch((e) => alert(e.message))}
                     id="export-tickets-json-btn"
                     className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white font-semibold text-xs shadow-md shadow-sky-600/20 flex items-center gap-2 transition-all"
                   >
                     <FileCode className="w-4 h-4" />
                     <span>{deIdentify ? "Export De-Identified JSON (Research / API)" : "Export Full JSON (FHIR / API Audit)"}</span>
-                  </a>
+                  </button>
                 </div>
               </div>
             </>

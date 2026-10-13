@@ -24,7 +24,7 @@ import {
   Layers,
   ArrowRight
 } from 'lucide-react';
-import { Ticket, TicketStatus, AuditLog, UrgencyTier, Call } from '../types';
+import { Ticket, TicketStatus, AuditLog, UrgencyTier, Call, ALL_STATUSES, STATUS_LABELS, isTerminalStatus } from '../types';
 import { fetchCall } from '../services/api';
 
 interface TicketDetailModalProps {
@@ -345,11 +345,11 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
             <div>
               <span className="text-[11px] text-slate-400 block font-medium">Task Status</span>
               <span className="text-sm font-bold text-white uppercase mt-0.5 inline-block">
-                {ticket.status.replace(/_/g, ' ')}
+                {STATUS_LABELS[ticket.status] ?? ticket.status.replace(/_/g, ' ')}
               </span>
             </div>
             <div className="flex items-center gap-1.5 flex-wrap">
-              {(['PENDING', 'IN_PROGRESS', 'DISPATCHED', 'RESOLVED'] as TicketStatus[]).map((st) => (
+              {ALL_STATUSES.map((st) => (
                 <button
                   key={st}
                   id={`set-status-${st.toLowerCase()}-btn`}
@@ -360,7 +360,7 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
                       : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
                   }`}
                 >
-                  {st.replace(/_/g, ' ')}
+                  {STATUS_LABELS[st]}
                 </button>
               ))}
             </div>
@@ -663,7 +663,7 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
                   ACK VERIFIED
                 </span>
               </div>
-            ) : ticket.status !== 'RESOLVED' && onAcknowledge ? (
+            ) : !isTerminalStatus(ticket.status) && onAcknowledge ? (
               <div className="p-2.5 rounded-lg bg-amber-950/30 border border-amber-500/40 space-y-2">
                 <div className="flex items-center justify-between text-amber-300 text-[11px] font-bold">
                   <span>Awaiting Staff Acknowledgement</span>
@@ -709,7 +709,7 @@ export const TicketDetailModal: React.FC<TicketDetailModalProps> = ({
               </div>
             ) : null}
 
-            {ticket.status !== 'RESOLVED' && onEscalate && (
+            {!isTerminalStatus(ticket.status) && onEscalate && (
               <div>
                 {!showEscalateForm ? (
                   <button
